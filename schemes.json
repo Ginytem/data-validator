@@ -1,0 +1,81 @@
+{
+  "schemes": [
+    {
+      "name": "月租车导入数据校验",
+      "description": "月租车辆导入模板：必填项检测、姓名≤15字、车牌号校验、手机号校验、时间归一化、车牌去重",
+      "header_row": 2,
+      "expected_headers": [
+        "项目名称（必填）",
+        "车辆类型（必填项）",
+        "部门（非必填项）",
+        "车主姓名（必填项）",
+        "车位数（必填项）",
+        "一位多车（必填项 是或者否）",
+        "超位入场模式（非必填）",
+        "车牌号（必填项）",
+        "开始时间(yyyy-mm-dd)（必填项）",
+        "结束时间(yyyy-mm-dd)（必填项）",
+        "手机号（非必填)",
+        "储值金额(非必填)",
+        "车辆备注(非必填)",
+        "门牌号(非必填)",
+        "车位号(非必填)",
+        "身份证号(非必填)"
+      ],
+      "columns": {
+        "项目名称（必填）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" }
+          ]
+        },
+        "车辆类型（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" }
+          ]
+        },
+        "车主姓名（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" },
+            { "rule": "maxlen15", "on_invalid": "truncate15", "copy_to": "车辆备注(非必填)" }
+          ]
+        },
+        "车位数（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" }
+          ]
+        },
+        "一位多车（必填项 是或者否）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" }
+          ]
+        },
+        "车牌号（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" },
+            { "rule": "plate", "on_invalid": "delete_row" }
+          ]
+        },
+        "开始时间(yyyy-mm-dd)（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" },
+            { "rule": "datetime", "on_invalid": "mark" }
+          ],
+          "transform": "date_ymd"
+        },
+        "结束时间(yyyy-mm-dd)（必填项）": {
+          "validators": [
+            { "rule": "required", "on_invalid": "mark" },
+            { "rule": "datetime", "on_invalid": "mark" }
+          ],
+          "transform": "date_ymd"
+        },
+        "手机号（非必填)": {
+          "validators": [
+            { "rule": "mobile", "on_invalid": "clear" }
+          ]
+        }
+      },
+      "dedup": { "column": "车牌号（必填项）", "keep": "first", "ignore_empty": true }
+    }
+  ]
+}
