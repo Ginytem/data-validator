@@ -352,7 +352,7 @@ def run_scheme(df, scheme, header_idx=0):
                 if assigned.get(p) != idx:
                     keep_r = out.at[assigned[p], '__orig_row']
                     dup_issues.append((r, f'第{r}行（{p}→保留至第{keep_r}行）'))
-            new_val = ', '.join(kept) if kept else ''
+            new_val = ','.join(kept) if kept else ''
             if _norm(out.at[idx, dup_col]) != new_val:
                 out.at[idx, dup_col] = new_val
                 cell_changes[(r, dup_col)] = new_val if new_val else None
