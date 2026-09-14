@@ -374,6 +374,40 @@ def run_scheme(df, scheme, header_idx=0):
 
     col_letters = {name: _col_letter(i + 1) for i, name in enumerate(out.columns)}
 
+    # 1.5) 同名区分：按"姓名+手机号"（无手机号仅姓名）分组，组内结束时间不一致时，
+    #      第二个起的行姓名自动加数字递增（王玉梅 → 王玉梅1 → 王玉梅2），
+    #      避免系统把不同租期误判为一位多车。字段限 15 字，加序号超长时截断原名保数字。
+    name_col = next((c for c in columns_cfg if '车主姓名' in c), None)
+    phone_col = next((c for c in columns_cfg if '手机号' in c), None)
+    end_col = next((c for c in columns_cfg if '结束时间' in c), None)
+    if name_col and end_col and name_col in out.columns:
+        name_groups = {}
+        for idx in out.index:
+            nm = _norm(out.at[idx, name_col])
+            if not nm:
+                continue
+            ph = _norm(out.at[idx, phone_col]) if phone_col in out.columns else ''
+            key = (nm, ph) if ph else (nm,)
+            name_groups.setdefault(key, []).append(idx)
+        for key, idxs in name_groups.items():
+            if len(idxs) < 2:
+                continue
+            ends = {_norm(out.at[i, end_col]) for i in idxs if _norm(out.at[i, end_col])}
+            if len(ends) < 2:
+                continue  # 结束时间一致 = 同期一位多车，不需要区分
+            base_r = out.at[idxs[0], '__orig_row']
+            base_nm = _norm(out.at[idxs[0], name_col])
+            for n, i in enumerate(idxs[1:], start=1):
+                cur = _norm(out.at[i, name_col])
+                suffix = str(n)
+                new_name = cur + suffix
+                if len(new_name) > 15:
+                    new_name = cur[:15 - len(suffix)] + suffix  # 超 15 字：截断原名保数字
+                out.at[i, name_col] = new_name
+                r = out.at[i, '__orig_row']
+                cell_changes[(r, name_col)] = new_name
+                issue_items.append(('姓名区分', r, f'第{r}行 {base_nm} → {new_name}（与第{base_r}行结束时间不同）'))
+
     # 2) 逐列逐规则校验 + 修复动作
     for col, conf in columns_cfg.items():
         if col not in out.columns:
@@ -482,14 +516,14 @@ def run_scheme(df, scheme, header_idx=0):
         grouped.setdefault('车牌O/I已替换', []).append((r, letter, old, new))
 
     issues = []
-    for label in ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字',
+    for label in ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字', '姓名区分',
                   '车牌无效', '车牌重复', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']:
         if label not in grouped:
             continue
         rows = sorted(grouped[label])
         if label == '车牌O/I已替换':
             cells = [f'{letter}{r}（{old}→{new}）' for r, letter, old, new in rows]
-        elif label == '车牌重复':
+        elif label in ('车牌重复', '姓名区分'):
             cells = [text for _, text in rows]
         elif label in ('车牌无效', '车位不足', '车牌为空'):
             cells = [f'第{r}行' for r, _ in rows]
@@ -866,6 +900,7 @@ def main():
                        '非"一位多车"的行车牌数超过车位数时标红提示车位不足；'
                        '无效手机号已清空（原值复制到备注列）；'
                        '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
+                       '同名同手机号且结束时间不同的行，第二个起姓名加数字1、2…区分（避免误判一位多车）；'
                        '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
