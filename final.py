@@ -100,6 +100,70 @@ def _col_letter(idx1):
     return s
 
 
+# ============ 多车牌支持（一个单元格多个车牌，逗号/顿号/分号/空白分隔） ============
+
+def _split_plates_detailed(value):
+    """拆分单元格内的多个车牌。
+
+    返回 (plates, dup_in_cell)：
+    - plates：去重后（保留首个出现顺序）的车牌列表（已转大写、去空格）
+    - dup_in_cell：该格内重复出现的车牌集合（行内重复，保留一个）
+    空值/空串返回 ([], set())。
+    """
+    if pd.isna(value):
+        return [], set()
+    s = str(value).strip()
+    if not s:
+        return [], set()
+    parts = [p.strip().upper() for p in re.split(r'[,，、;；\s]+', s)]
+    plates, dup = [], set()
+    for p in parts:
+        if not p:
+            continue
+        if p in plates:
+            dup.add(p)
+        else:
+            plates.append(p)
+    return plates, dup
+
+
+def _capacity(value):
+    """车位数 -> 免费名额容量（用于多车牌去重的容量优先分配）。
+
+    - 缺失 / 空串 / 非数字：按 1 处理（保底 1 个名额，避免误删；必填缺失另有标红）
+    - 数值：向下取整（0.5 -> 0，1.9 -> 1）；负数按 0
+    """
+    if pd.isna(value):
+        return 1
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return 1
+    try:
+        f = float(value)
+    except (ValueError, TypeError):
+        return 1
+    if pd.isna(f):
+        return 1
+    if f < 0:
+        return 0
+    return int(f)
+
+
+def _capacity_is_valid(value):
+    """车位数是否为有效数字（用于决定是否触发'车位不足'提示；
+    缺失/非数字的行只报'必填项缺失'，不重复报'车位不足'）。"""
+    if pd.isna(value):
+        return False
+    if isinstance(value, str) and value.strip() == '':
+        return False
+    try:
+        f = float(value)
+    except (ValueError, TypeError):
+        return False
+    return not pd.isna(f)
+
+
 def _check_rule(rule, series):
     """单规则校验，返回 Series（True=有效）。
 
@@ -111,7 +175,14 @@ def _check_rule(rule, series):
     if rule == 'maxlen15':
         return series.map(lambda x: len(_norm(x)) <= 15)
     if rule == 'plate':
-        return series.map(lambda x: _norm(x) == '' or bool(PLATE_RE.match(_norm(x).upper())))
+        def _plate_ok(x):
+            if _norm(x) == '':
+                return True
+            plates, _ = _split_plates_detailed(x)
+            if not plates:
+                return False
+            return all(PLATE_RE.match(p) for p in plates)
+        return series.map(_plate_ok)
     if rule == 'mobile':
         return series.map(lambda x: _norm(x) == '' or bool(MOBILE_RE.match(_norm(x))))
     if rule == 'datetime':
@@ -171,27 +242,31 @@ def _parse_dates(series):
     return parsed
 
 
-def run_scheme(df, scheme, header_idx=0, multi_plate=False):
+def run_scheme(df, scheme, header_idx=0):
     """按预设方案执行校验。
 
-    流程：车牌 O/I 字母自动替换为 0/1 → 车牌去重（保留第一行）→
-    一位多车模式处理（车位数/一位多车列）→ 逐列逐规则校验并按失败动作处理 →
-    时间列归一化为 yyyy-mm-dd → 空车牌/重复车牌整行删除。
+    流程：车牌 O/I 字母自动替换为 0/1 → 多车牌拆分 + 按车位数容量优先去重 →
+    逐列逐规则校验并按失败动作处理 → 时间列归一化为 yyyy-mm-dd → 空车牌行删除。
 
     失败动作：
     - mark           ：无效单元格标红（必填缺失 / 时间无法解析 / 车牌省份或位数不对）
     - clear          ：清空该单元格（无效手机号，原值复制到备注列）
     - truncate15     ：截断至 15 字（姓名超长，原姓名复制到备注列）
     - fill_from_plate：姓名缺失时用同行车牌号填充
-    - delete_row     ：删除整行（车牌为空 / 车牌无效 / 车牌重复）
+    - delete_row     ：删除整行（车牌为空）
 
-    multi_plate=True ：勾选"一位多车"时，同一姓名出现>1 次的行，车位数写 1、一位多车写"是"
-    multi_plate=False：未勾选时，所有行车位数写 9999、一位多车写"否"
+    多车牌去重（容量优先）：
+    - 一格可含多个车牌（逗号/顿号/分号/空白分隔），拆分为独立子车牌逐个校验
+    - 行内重复：保留一个，不删行，摘要提示
+    - 跨行重复：按"车位数 = 免费名额"做容量优先分配——重复车牌优先保留在
+      还有剩余名额的行；所有出现过的行都满时，保留在首次出现的行（宁超不丢，
+      该行标红提示车位不足）
+    - 分配后被剔空的车牌格视为空，按"车牌为空"删除整行
 
     返回 (result, red_cells, cell_changes, delete_rows, summary)：
     - result: 处理后的 DataFrame（用于界面预览）
     - red_cells: {列名: {原文件行号集合}}，标红单元格位置
-    - cell_changes: {(原文件行号, 列名): 新值}，清空/截断/时间归一化/填充写回值
+    - cell_changes: {(原文件行号, 列名): 新值}，清空/截断/时间归一化/填充/去重写回值
     - delete_rows: 需要整行删除的原文件行号列表
     - summary: {'issues': [{'label','cells'}, ...]}
       issues 里 cells 为原文件中的单元格定位（如 K5）或行号（第5行）
@@ -204,7 +279,7 @@ def run_scheme(df, scheme, header_idx=0, multi_plate=False):
     # 记录每一行在原文件中的 Excel 行号，用于摘要定位与修改写回
     out['__orig_row'] = list(range(first_data_row, first_data_row + len(out)))
 
-    issue_items = []  # (label, orig_row, col_letter|None)
+    issue_items = []  # (label, orig_row, col_letter|None|自定义文本)
     oi_fix_items = []  # (orig_row, col_letter, 原值, 新值) —— 车牌 O/I 替换提示
     delete_rows = set()
     red_cells = {}
@@ -212,7 +287,7 @@ def run_scheme(df, scheme, header_idx=0, multi_plate=False):
     cleared = 0
     truncated = 0
 
-    # 0) 车牌 O/I 字母自动替换为 0/1（修复），替换后再去重和校验
+    # 0) 车牌 O/I 字母自动替换为 0/1（修复），替换后再拆分、去重和校验
     for col, conf in columns_cfg.items():
         if col not in out.columns or conf.get('transform') != 'plate_o_i_fix':
             continue
@@ -228,41 +303,71 @@ def run_scheme(df, scheme, header_idx=0, multi_plate=False):
             out[col] = out[col].astype(object)
             out.loc[changed, col] = vals[changed]
 
-    # 1) 车牌去重：空车牌不参与，保留第一行
+    # 1) 多车牌去重：拆分后按车位数容量优先分配，剔除重复子车牌（不删行），
+    #    分配后整格为空的行由第 2 步"车牌为空"删除
     dup_col = dedup_cfg.get('column')
+    capacity_col = dedup_cfg.get('capacity_col') or '车位数（必填项）'
     if dup_col and dup_col in out.columns:
-        normed = out[dup_col].map(lambda x: _norm(x).upper())
-        empty = normed.eq('')
-        keep = empty | (~normed.duplicated(keep='first'))
-        if (~keep).any():
-            for r in out.loc[~keep, '__orig_row'].tolist():
-                issue_items.append(('车牌重复', r, None))
-                delete_rows.add(r)
-            out = out[keep].copy().reset_index(drop=True)
+        split_map = {}   # idx -> (plates, dup_in_cell)
+        plate_rows = {}  # plate -> [idx, ...]（出现过的行）
+        for idx in out.index:
+            plates, dup_in_cell = _split_plates_detailed(out.at[idx, dup_col])
+            split_map[idx] = (plates, dup_in_cell)
+            for p in plates:
+                plate_rows.setdefault(p, []).append(idx)
 
-    # 1.5) 一位多车模式处理（勾选/未勾选），放在列校验前，避免车位数/一位多车列误报必填缺失
-    name_col = '车主姓名（必填项）'
-    pos_col = '车位数（必填项）'
-    multi_col = '一位多车（必填项 是或者否）'
-    if multi_plate:
-        if name_col in out.columns and pos_col in out.columns and multi_col in out.columns:
-            normed_names = out[name_col].map(lambda x: _norm(x))
-            dup_names = set(normed_names[normed_names.ne('')].value_counts().loc[lambda s: s > 1].index)
-            mask = normed_names.isin(dup_names)
-            if mask.any():
-                out.loc[mask, pos_col] = 1
-                out.loc[mask, multi_col] = '是'
-                for r in out.loc[mask, '__orig_row'].tolist():
-                    cell_changes[(r, pos_col)] = 1
-                    cell_changes[(r, multi_col)] = '是'
-                    issue_items.append(('一位多车修正', r, None))
-    else:
-        if pos_col in out.columns and multi_col in out.columns:
-            out[pos_col] = 9999
-            out[multi_col] = '否'
-            for r in out['__orig_row'].tolist():
-                cell_changes[(r, pos_col)] = 9999
-                cell_changes[(r, multi_col)] = '否'
+        cap_series = out[capacity_col] if capacity_col in out.columns else pd.Series(1, index=out.index)
+
+        def cap_of(idx):
+            return _capacity(cap_series.loc[idx])
+
+        assigned = {}  # plate -> idx（最终保留在哪一行）
+        row_load = {idx: 0 for idx in out.index}
+
+        # 逐行扫描：重复车牌优先分配给"还有剩余名额"的出现行；全满则留首次出现行
+        for idx in out.index:
+            plates, _ = split_map[idx]
+            for p in plates:
+                if p in assigned:
+                    continue
+                target = None
+                for c in plate_rows[p]:
+                    if row_load[c] < cap_of(c):
+                        target = c
+                        break
+                if target is None:
+                    target = plate_rows[p][0]  # 宁超不丢
+                assigned[p] = target
+                row_load[target] += 1
+
+        # 重写格子：只保留分配在本行的车牌，其余剔除并记录摘要
+        dup_issues = []  # (orig_row, 自定义文本)
+        for idx in out.index:
+            plates, dup_in_cell = split_map[idx]
+            r = out.at[idx, '__orig_row']
+            for p in dup_in_cell:
+                dup_issues.append((r, f'第{r}行（{p}，行内重复）'))
+            kept = [p for p in plates if assigned.get(p) == idx]
+            for p in plates:
+                if assigned.get(p) != idx:
+                    keep_r = out.at[assigned[p], '__orig_row']
+                    dup_issues.append((r, f'第{r}行（{p}→保留至第{keep_r}行）'))
+            new_val = ', '.join(kept) if kept else ''
+            if _norm(out.at[idx, dup_col]) != new_val:
+                out.at[idx, dup_col] = new_val
+                cell_changes[(r, dup_col)] = new_val if new_val else None
+        for r, text in dup_issues:
+            issue_items.append(('车牌重复', r, text))
+
+        # 超容量提示：车位数有效时，该行保留车牌数 > 容量 → 标红该格（车位不足）
+        for idx in out.index:
+            plates, _ = split_map[idx]
+            kept_cnt = sum(1 for p in plates if assigned.get(p) == idx)
+            cap = cap_of(idx)
+            if kept_cnt > cap and _capacity_is_valid(cap_series.loc[idx]):
+                r = out.at[idx, '__orig_row']
+                red_cells.setdefault(dup_col, set()).add(r)
+                issue_items.append(('车位不足', r, None))
 
     col_letters = {name: _col_letter(i + 1) for i, name in enumerate(out.columns)}
 
@@ -375,13 +480,15 @@ def run_scheme(df, scheme, header_idx=0, multi_plate=False):
 
     issues = []
     for label in ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字',
-                  '车牌无效', '车牌重复', '车牌为空', '一位多车修正', '必填项缺失', '时间无法解析']:
+                  '车牌无效', '车牌重复', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']:
         if label not in grouped:
             continue
         rows = sorted(grouped[label])
         if label == '车牌O/I已替换':
             cells = [f'{letter}{r}（{old}→{new}）' for r, letter, old, new in rows]
-        elif label in ('车牌无效', '车牌重复', '车牌为空', '一位多车修正'):
+        elif label == '车牌重复':
+            cells = [text for _, text in rows]
+        elif label in ('车牌无效', '车位不足', '车牌为空'):
             cells = [f'第{r}行' for r, _ in rows]
         else:
             cells = [f'{letter}{r}' for r, letter in rows]
@@ -666,7 +773,6 @@ def main():
             disabled=has_run,
             use_container_width=True,
         )
-        multi_plate = st.checkbox('一位多车', value=False, help='勾选：同一姓名出现多辆车时，车位数写 1、一位多车写"是"；不勾选：车位数默认 9999、一位多车写"否"')
     with btn_col2:
         if has_run:
             out = st.session_state['scheme_out']
@@ -716,7 +822,7 @@ def main():
             st.caption('校验完成后可在此下载处理好的文件')
 
     if run_clicked:
-        out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx, multi_plate=multi_plate)
+        out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx)
 
         # 列名 -> 列号（用于在原文件上定位单元格）
         col_pos = {}
@@ -752,9 +858,12 @@ def main():
             st.session_state['show_note'] = not st.session_state['show_note']
         if st.session_state['show_note']:
             st.caption('修改说明：含字母O/I的车牌已自动替换为0/1（摘要中列出替换位置）；'
-                       '无效车牌（省份/位数不对）已标红；无效手机号已清空（原值复制到备注列）；'
+                       '无效车牌（省份/位数不对）已标红；一个单元格含多个车牌（逗号分隔）时逐个校验，'
+                       '重复车牌按车位数容量优先分配去重（摘要中列出剔除位置与保留位置）；'
+                       '行车牌数超过车位数时标红提示车位不足；'
+                       '无效手机号已清空（原值复制到备注列）；'
                        '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
-                       '车牌为空/重复已删除整行；一位多车按勾选状态修正车位数；标红的单元格请在原表中核对修改。')
+                       '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
         st.write(out)

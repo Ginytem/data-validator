@@ -76,7 +76,7 @@
           ]
         }
       },
-      "dedup": { "column": "车牌号（必填项）", "keep": "first", "ignore_empty": true }
+      "dedup": { "column": "车牌号（必填项）", "capacity_col": "车位数（必填项）", "keep": "first", "ignore_empty": true }
     }
   ]
 }
