@@ -35,7 +35,7 @@
         },
         "车主姓名（必填项）": {
           "validators": [
-            { "rule": "required", "on_invalid": "mark" },
+            { "rule": "required", "on_invalid": "fill_from_plate", "source_col": "车牌号（必填项）" },
             { "rule": "maxlen15", "on_invalid": "truncate15", "copy_to": "车辆备注(非必填)" }
           ]
         },

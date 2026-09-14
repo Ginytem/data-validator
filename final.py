@@ -171,23 +171,27 @@ def _parse_dates(series):
     return parsed
 
 
-def run_scheme(df, scheme, header_idx=0):
+def run_scheme(df, scheme, header_idx=0, multi_plate=False):
     """按预设方案执行校验。
 
     流程：车牌 O/I 字母自动替换为 0/1 → 车牌去重（保留第一行）→
-    逐列逐规则校验并按失败动作处理 → 时间列归一化为 yyyy-mm-dd →
-    空车牌/重复车牌整行删除。
+    一位多车模式处理（车位数/一位多车列）→ 逐列逐规则校验并按失败动作处理 →
+    时间列归一化为 yyyy-mm-dd → 空车牌/重复车牌整行删除。
 
     失败动作：
-    - mark       ：无效单元格标红（必填缺失 / 时间无法解析 / 车牌省份或位数不对）
-    - clear      ：清空该单元格（无效手机号）
-    - truncate15 ：截断至 15 字（姓名超长，原姓名复制到备注列）
-    - delete_row ：删除整行（车牌为空 / 车牌无效 / 车牌重复）
+    - mark           ：无效单元格标红（必填缺失 / 时间无法解析 / 车牌省份或位数不对）
+    - clear          ：清空该单元格（无效手机号，原值复制到备注列）
+    - truncate15     ：截断至 15 字（姓名超长，原姓名复制到备注列）
+    - fill_from_plate：姓名缺失时用同行车牌号填充
+    - delete_row     ：删除整行（车牌为空 / 车牌无效 / 车牌重复）
+
+    multi_plate=True ：勾选"一位多车"时，同一姓名出现>1 次的行，车位数写 1、一位多车写"是"
+    multi_plate=False：未勾选时，所有行车位数写 9999、一位多车写"否"
 
     返回 (result, red_cells, cell_changes, delete_rows, summary)：
     - result: 处理后的 DataFrame（用于界面预览）
     - red_cells: {列名: {原文件行号集合}}，标红单元格位置
-    - cell_changes: {(原文件行号, 列名): 新值}，清空/截断/时间归一化写回值
+    - cell_changes: {(原文件行号, 列名): 新值}，清空/截断/时间归一化/填充写回值
     - delete_rows: 需要整行删除的原文件行号列表
     - summary: {'issues': [{'label','cells'}, ...]}
       issues 里 cells 为原文件中的单元格定位（如 K5）或行号（第5行）
@@ -201,23 +205,28 @@ def run_scheme(df, scheme, header_idx=0):
     out['__orig_row'] = list(range(first_data_row, first_data_row + len(out)))
 
     issue_items = []  # (label, orig_row, col_letter|None)
+    oi_fix_items = []  # (orig_row, col_letter, 原值, 新值) —— 车牌 O/I 替换提示
     delete_rows = set()
     red_cells = {}
     cell_changes = {}
     cleared = 0
     truncated = 0
 
-    # 0) 车牌 O/I 字母自动替换为 0/1（修复，不报问题），替换后再去重和校验
+    # 0) 车牌 O/I 字母自动替换为 0/1（修复），替换后再去重和校验
     for col, conf in columns_cfg.items():
         if col not in out.columns or conf.get('transform') != 'plate_o_i_fix':
             continue
         vals = out[col].map(lambda x: _norm(x).upper().replace('O', '0').replace('I', '1'))
         changed = out[col].map(lambda x: _norm(x)) != vals
         if changed.any():
+            letter = _col_letter(list(out.columns).index(col) + 1)
+            for r, old, new in zip(out.loc[changed, '__orig_row'].tolist(),
+                                   out.loc[changed, col].tolist(),
+                                   vals[changed].tolist()):
+                cell_changes[(r, col)] = new
+                oi_fix_items.append((r, letter, _norm(old), new))
             out[col] = out[col].astype(object)
             out.loc[changed, col] = vals[changed]
-            for r, v in zip(out.loc[changed, '__orig_row'].tolist(), vals[changed].tolist()):
-                cell_changes[(r, col)] = v
 
     # 1) 车牌去重：空车牌不参与，保留第一行
     dup_col = dedup_cfg.get('column')
@@ -230,6 +239,30 @@ def run_scheme(df, scheme, header_idx=0):
                 issue_items.append(('车牌重复', r, None))
                 delete_rows.add(r)
             out = out[keep].copy().reset_index(drop=True)
+
+    # 1.5) 一位多车模式处理（勾选/未勾选），放在列校验前，避免车位数/一位多车列误报必填缺失
+    name_col = '车主姓名（必填项）'
+    pos_col = '车位数（必填项）'
+    multi_col = '一位多车（必填项 是或者否）'
+    if multi_plate:
+        if name_col in out.columns and pos_col in out.columns and multi_col in out.columns:
+            normed_names = out[name_col].map(lambda x: _norm(x))
+            dup_names = set(normed_names[normed_names.ne('')].value_counts().loc[lambda s: s > 1].index)
+            mask = normed_names.isin(dup_names)
+            if mask.any():
+                out.loc[mask, pos_col] = 1
+                out.loc[mask, multi_col] = '是'
+                for r in out.loc[mask, '__orig_row'].tolist():
+                    cell_changes[(r, pos_col)] = 1
+                    cell_changes[(r, multi_col)] = '是'
+                    issue_items.append(('一位多车修正', r, None))
+    else:
+        if pos_col in out.columns and multi_col in out.columns:
+            out[pos_col] = 9999
+            out[multi_col] = '否'
+            for r in out['__orig_row'].tolist():
+                cell_changes[(r, pos_col)] = 9999
+                cell_changes[(r, multi_col)] = '否'
 
     col_letters = {name: _col_letter(i + 1) for i, name in enumerate(out.columns)}
 
@@ -283,6 +316,27 @@ def run_scheme(df, scheme, header_idx=0):
                         new_remark = f'{prev}；原姓名：{full}' if prev else f'原姓名：{full}'
                         out.at[label, copy_to] = new_remark
                         cell_changes[(r, copy_to)] = new_remark
+            elif action == 'fill_from_plate':
+                source_col = vconf.get('source_col')
+                if source_col and source_col in out.columns:
+                    fill_vals = out.loc[invalid, source_col].map(lambda x: _norm(x))
+                    can_fill = fill_vals.ne('')
+                    fill_positions = fill_vals[can_fill].index
+                    if len(fill_positions):
+                        new_vals = out.loc[fill_positions, source_col].map(lambda x: _norm(x))
+                        out.loc[fill_positions, col] = new_vals
+                        for r, v in zip(out.loc[fill_positions, '__orig_row'].tolist(), new_vals.tolist()):
+                            cell_changes[(r, col)] = v
+                            issue_items.append(('姓名缺失已用车牌填充', r, letter))
+                    no_fill_positions = fill_vals[~can_fill].index
+                    if len(no_fill_positions):
+                        red_cells.setdefault(col, set()).update(out.loc[no_fill_positions, '__orig_row'].tolist())
+                        for r in out.loc[no_fill_positions, '__orig_row'].tolist():
+                            issue_items.append(('必填项缺失', r, letter))
+                else:
+                    red_cells.setdefault(col, set()).update(orig_rows)
+                    for r in orig_rows:
+                        issue_items.append(('必填项缺失', r, letter))
             else:  # mark
                 red_cells.setdefault(col, set()).update(orig_rows)
                 label = ('必填项缺失' if rule == 'required' else
@@ -308,18 +362,26 @@ def run_scheme(df, scheme, header_idx=0):
     if delete_rows:
         out = out[~out['__orig_row'].isin(delete_rows)].copy().reset_index(drop=True)
 
-    # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身除外）
+    # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身、O/I 替换提示除外）
     grouped = {}
     for label, r, letter in issue_items:
-        if label not in ('车牌无效', '车牌重复', '车牌为空') and r in delete_rows:
+        if label not in ('车牌无效', '车牌重复', '车牌为空', '车牌O/I已替换') and r in delete_rows:
             continue
         grouped.setdefault(label, []).append((r, letter))
+
+    # 车牌 O/I 替换提示：始终列出（用户可能在源文件自行修改，需要知道哪些车牌被替换）
+    for r, letter, old, new in oi_fix_items:
+        grouped.setdefault('车牌O/I已替换', []).append((r, letter, old, new))
+
     issues = []
-    for label in ['无效手机号', '姓名超15字', '车牌无效', '车牌重复', '车牌为空', '必填项缺失', '时间无法解析']:
+    for label in ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字',
+                  '车牌无效', '车牌重复', '车牌为空', '一位多车修正', '必填项缺失', '时间无法解析']:
         if label not in grouped:
             continue
         rows = sorted(grouped[label])
-        if label in ('车牌无效', '车牌重复', '车牌为空'):
+        if label == '车牌O/I已替换':
+            cells = [f'{letter}{r}（{old}→{new}）' for r, letter, old, new in rows]
+        elif label in ('车牌无效', '车牌重复', '车牌为空', '一位多车修正'):
             cells = [f'第{r}行' for r, _ in rows]
         else:
             cells = [f'{letter}{r}' for r, letter in rows]
@@ -604,6 +666,7 @@ def main():
             disabled=has_run,
             use_container_width=True,
         )
+        multi_plate = st.checkbox('一位多车', value=False, help='勾选：同一姓名出现多辆车时，车位数写 1、一位多车写"是"；不勾选：车位数默认 9999、一位多车写"否"')
     with btn_col2:
         if has_run:
             out = st.session_state['scheme_out']
@@ -653,7 +716,7 @@ def main():
             st.caption('校验完成后可在此下载处理好的文件')
 
     if run_clicked:
-        out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx)
+        out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx, multi_plate=multi_plate)
 
         # 列名 -> 列号（用于在原文件上定位单元格）
         col_pos = {}
@@ -688,9 +751,10 @@ def main():
         if st.button('修改说明', icon='👁', key='note_toggle'):
             st.session_state['show_note'] = not st.session_state['show_note']
         if st.session_state['show_note']:
-            st.caption('修改说明：含字母O/I的车牌已自动替换为0/1；无效车牌（省份/位数不对）已标红；'
-                       '无效手机号已清空（原值复制到备注列）；姓名超15字已截断（原姓名复制到备注列）；'
-                       '车牌为空/重复已删除整行；标红的单元格请在原表中核对修改。')
+            st.caption('修改说明：含字母O/I的车牌已自动替换为0/1（摘要中列出替换位置）；'
+                       '无效车牌（省份/位数不对）已标红；无效手机号已清空（原值复制到备注列）；'
+                       '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
+                       '车牌为空/重复已删除整行；一位多车按勾选状态修正车位数；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
         st.write(out)
