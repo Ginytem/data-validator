@@ -51,9 +51,10 @@
         },
         "车牌号（必填项）": {
           "validators": [
-            { "rule": "required", "on_invalid": "mark" },
-            { "rule": "plate", "on_invalid": "delete_row" }
-          ]
+            { "rule": "required", "on_invalid": "delete_row" },
+            { "rule": "plate", "on_invalid": "mark" }
+          ],
+          "transform": "plate_o_i_fix"
         },
         "开始时间(yyyy-mm-dd)（必填项）": {
           "validators": [
@@ -71,7 +72,7 @@
         },
         "手机号（非必填)": {
           "validators": [
-            { "rule": "mobile", "on_invalid": "clear" }
+            { "rule": "mobile", "on_invalid": "clear", "copy_to": "车辆备注(非必填)" }
           ]
         }
       },

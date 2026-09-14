@@ -174,15 +174,15 @@ def _parse_dates(series):
 def run_scheme(df, scheme, header_idx=0):
     """按预设方案执行校验。
 
-    流程：先按车牌去重（删除重复行，保留第一行，空车牌不参与）→
+    流程：车牌 O/I 字母自动替换为 0/1 → 车牌去重（保留第一行）→
     逐列逐规则校验并按失败动作处理 → 时间列归一化为 yyyy-mm-dd →
-    无效车牌整行删除。
+    空车牌/重复车牌整行删除。
 
     失败动作：
-    - mark       ：无效单元格标红（必填缺失 / 时间无法解析）
+    - mark       ：无效单元格标红（必填缺失 / 时间无法解析 / 车牌省份或位数不对）
     - clear      ：清空该单元格（无效手机号）
-    - truncate15 ：截断至 15 字（姓名超长）
-    - delete_row ：删除整行（无效车牌）
+    - truncate15 ：截断至 15 字（姓名超长，原姓名复制到备注列）
+    - delete_row ：删除整行（车牌为空 / 车牌无效 / 车牌重复）
 
     返回 (result, red_cells, cell_changes, delete_rows, summary)：
     - result: 处理后的 DataFrame（用于界面预览）
@@ -206,6 +206,18 @@ def run_scheme(df, scheme, header_idx=0):
     cell_changes = {}
     cleared = 0
     truncated = 0
+
+    # 0) 车牌 O/I 字母自动替换为 0/1（修复，不报问题），替换后再去重和校验
+    for col, conf in columns_cfg.items():
+        if col not in out.columns or conf.get('transform') != 'plate_o_i_fix':
+            continue
+        vals = out[col].map(lambda x: _norm(x).upper().replace('O', '0').replace('I', '1'))
+        changed = out[col].map(lambda x: _norm(x)) != vals
+        if changed.any():
+            out[col] = out[col].astype(object)
+            out.loc[changed, col] = vals[changed]
+            for r, v in zip(out.loc[changed, '__orig_row'].tolist(), vals[changed].tolist()):
+                cell_changes[(r, col)] = v
 
     # 1) 车牌去重：空车牌不参与，保留第一行
     dup_col = dedup_cfg.get('column')
@@ -235,14 +247,25 @@ def run_scheme(df, scheme, header_idx=0):
             orig_rows = out.loc[invalid, '__orig_row'].tolist()
             if action == 'delete_row':
                 delete_rows.update(orig_rows)
+                dl_label = '车牌为空' if rule == 'required' else '车牌无效'
                 for r in orig_rows:
-                    issue_items.append(('车牌无效', r, None))
+                    issue_items.append((dl_label, r, None))
             elif action == 'clear':
+                originals = out.loc[invalid, col].map(lambda x: _norm(x))
                 out.loc[invalid, col] = None
                 cleared += len(orig_rows)
-                for r in orig_rows:
+                for r, v in zip(orig_rows, originals.tolist()):
                     cell_changes[(r, col)] = None
                     issue_items.append(('无效手机号', r, letter))
+                # 清空前把原值复制到备注列，避免丢失信息
+                copy_to = vconf.get('copy_to')
+                if copy_to and copy_to in out.columns:
+                    for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
+                        r = out.at[label, '__orig_row']
+                        prev = _norm(out.at[label, copy_to])
+                        new_remark = f'{prev}；原手机号：{full}' if prev else f'原手机号：{full}'
+                        out.at[label, copy_to] = new_remark
+                        cell_changes[(r, copy_to)] = new_remark
             elif action == 'truncate15':
                 originals = out.loc[invalid, col].map(lambda x: _norm(x))
                 new_vals = originals.map(lambda x: x[:15])
@@ -262,7 +285,9 @@ def run_scheme(df, scheme, header_idx=0):
                         cell_changes[(r, copy_to)] = new_remark
             else:  # mark
                 red_cells.setdefault(col, set()).update(orig_rows)
-                label = '必填项缺失' if rule == 'required' else ('时间无法解析' if rule == 'datetime' else '无效数据')
+                label = ('必填项缺失' if rule == 'required' else
+                         ('时间无法解析' if rule == 'datetime' else
+                          ('车牌无效' if rule == 'plate' else '无效数据')))
                 for r in orig_rows:
                     issue_items.append((label, r, letter))
 
@@ -283,18 +308,18 @@ def run_scheme(df, scheme, header_idx=0):
     if delete_rows:
         out = out[~out['__orig_row'].isin(delete_rows)].copy().reset_index(drop=True)
 
-    # 5) 汇总：被删除行上的其它问题不再列出
+    # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身除外）
     grouped = {}
     for label, r, letter in issue_items:
-        if label not in ('车牌无效', '车牌重复') and r in delete_rows:
+        if label not in ('车牌无效', '车牌重复', '车牌为空') and r in delete_rows:
             continue
         grouped.setdefault(label, []).append((r, letter))
     issues = []
-    for label in ['无效手机号', '姓名超15字', '车牌无效', '车牌重复', '必填项缺失', '时间无法解析']:
+    for label in ['无效手机号', '姓名超15字', '车牌无效', '车牌重复', '车牌为空', '必填项缺失', '时间无法解析']:
         if label not in grouped:
             continue
         rows = sorted(grouped[label])
-        if label in ('车牌无效', '车牌重复'):
+        if label in ('车牌无效', '车牌重复', '车牌为空'):
             cells = [f'第{r}行' for r, _ in rows]
         else:
             cells = [f'{letter}{r}' for r, letter in rows]
@@ -657,8 +682,15 @@ def main():
                 st.write(f"{it['label']}：{'、'.join(it['cells'])}")
         else:
             st.write('未发现不符合规则的数据。')
-        st.caption('修改说明：无效车牌/重复车牌已删除整行；姓名超15字已截断（原姓名复制到备注列）；'
-                   '无效手机号已清空；标红的单元格请在原表中核对修改。')
+        # 修改说明：默认隐藏，小眼睛点击展开
+        if 'show_note' not in st.session_state:
+            st.session_state['show_note'] = False
+        if st.button('修改说明', icon='👁', key='note_toggle'):
+            st.session_state['show_note'] = not st.session_state['show_note']
+        if st.session_state['show_note']:
+            st.caption('修改说明：含字母O/I的车牌已自动替换为0/1；无效车牌（省份/位数不对）已标红；'
+                       '无效手机号已清空（原值复制到备注列）；姓名超15字已截断（原姓名复制到备注列）；'
+                       '车牌为空/重复已删除整行；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
         st.write(out)
