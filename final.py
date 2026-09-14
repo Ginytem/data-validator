@@ -359,12 +359,15 @@ def run_scheme(df, scheme, header_idx=0):
         for r, text in dup_issues:
             issue_items.append(('车牌重复', r, text))
 
-        # 超容量提示：车位数有效时，该行保留车牌数 > 容量 → 标红该格（车位不足）
+        # 超容量提示：车位数有效且该行"一位多车"≠"是"时，保留车牌数 > 容量 → 标红（车位不足）。
+        # 模板允许"一位多车=是 + 车位数1 + 多车牌"（一位多车合法，不报车位不足）
+        multi_col_name = '一位多车（必填项 是或者否）'
         for idx in out.index:
             plates, _ = split_map[idx]
             kept_cnt = sum(1 for p in plates if assigned.get(p) == idx)
             cap = cap_of(idx)
-            if kept_cnt > cap and _capacity_is_valid(cap_series.loc[idx]):
+            is_multi_plate = multi_col_name in out.columns and _norm(out.at[idx, multi_col_name]).upper() == '是'
+            if kept_cnt > cap and _capacity_is_valid(cap_series.loc[idx]) and not is_multi_plate:
                 r = out.at[idx, '__orig_row']
                 red_cells.setdefault(dup_col, set()).add(r)
                 issue_items.append(('车位不足', r, None))
@@ -860,7 +863,7 @@ def main():
             st.caption('修改说明：含字母O/I的车牌已自动替换为0/1（摘要中列出替换位置）；'
                        '无效车牌（省份/位数不对）已标红；一个单元格含多个车牌（逗号分隔）时逐个校验，'
                        '重复车牌按车位数容量优先分配去重（摘要中列出剔除位置与保留位置）；'
-                       '行车牌数超过车位数时标红提示车位不足；'
+                       '非"一位多车"的行车牌数超过车位数时标红提示车位不足；'
                        '无效手机号已清空（原值复制到备注列）；'
                        '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
                        '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
