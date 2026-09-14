@@ -362,6 +362,7 @@ def run_scheme(df, scheme, header_idx=0):
         # 超容量提示：车位数有效且该行"一位多车"≠"是"时，保留车牌数 > 容量 → 标红（车位不足）。
         # 模板允许"一位多车=是 + 车位数1 + 多车牌"（一位多车合法，不报车位不足）
         multi_col_name = '一位多车（必填项 是或者否）'
+        dup_letter = _col_letter(list(out.columns).index(dup_col) + 1)
         for idx in out.index:
             plates, _ = split_map[idx]
             kept_cnt = sum(1 for p in plates if assigned.get(p) == idx)
@@ -370,7 +371,7 @@ def run_scheme(df, scheme, header_idx=0):
             if kept_cnt > cap and _capacity_is_valid(cap_series.loc[idx]) and not is_multi_plate:
                 r = out.at[idx, '__orig_row']
                 red_cells.setdefault(dup_col, set()).add(r)
-                issue_items.append(('车位不足', r, None))
+                issue_items.append(('车位不足', r, dup_letter))
 
     col_letters = {name: _col_letter(i + 1) for i, name in enumerate(out.columns)}
 
@@ -435,6 +436,7 @@ def run_scheme(df, scheme, header_idx=0):
                 # 清空前把原值复制到备注列，避免丢失信息
                 copy_to = vconf.get('copy_to')
                 if copy_to and copy_to in out.columns:
+                    out[copy_to] = out[copy_to].astype(object)  # 兼容空备注列（float64 → object）
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
@@ -446,12 +448,14 @@ def run_scheme(df, scheme, header_idx=0):
                 new_vals = originals.map(lambda x: x[:15])
                 out.loc[invalid, col] = new_vals
                 truncated += len(orig_rows)
+                red_cells.setdefault(col, set()).update(orig_rows)  # 姓名超15字标红（原始需求）
                 for r, v in zip(orig_rows, new_vals.tolist()):
                     cell_changes[(r, col)] = v
                     issue_items.append(('姓名超15字', r, letter))
                 # 截断前先把完整姓名复制到备注列，避免丢失重要信息
                 copy_to = vconf.get('copy_to')
                 if copy_to and copy_to in out.columns:
+                    out[copy_to] = out[copy_to].astype(object)  # 兼容空备注列（float64 → object）
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
@@ -525,8 +529,10 @@ def run_scheme(df, scheme, header_idx=0):
             cells = [f'{letter}{r}（{old}→{new}）' for r, letter, old, new in rows]
         elif label in ('车牌重复', '姓名区分'):
             cells = [text for _, text in rows]
-        elif label in ('车牌无效', '车位不足', '车牌为空'):
+        elif label == '车牌为空':
             cells = [f'第{r}行' for r, _ in rows]
+        elif label in ('车牌无效', '车位不足'):
+            cells = [f'{letter}{r}' for r, letter in rows]  # 标红位置用单元格定位（如 H28）
         else:
             cells = [f'{letter}{r}' for r, letter in rows]
         issues.append({'label': label, 'cells': cells})
