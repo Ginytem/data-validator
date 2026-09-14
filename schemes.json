@@ -36,7 +36,7 @@
         "车主姓名（必填项）": {
           "validators": [
             { "rule": "required", "on_invalid": "fill_from_plate", "source_col": "车牌号（必填项）" },
-            { "rule": "maxlen15", "on_invalid": "truncate15", "copy_to": "车辆备注(非必填)" }
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 15, "red": true, "copy_to": "车辆备注(非必填)", "copy_label": "原姓名" }
           ]
         },
         "车位数（必填项）": {
@@ -72,7 +72,17 @@
         },
         "手机号（非必填)": {
           "validators": [
-            { "rule": "mobile", "on_invalid": "clear", "copy_to": "车辆备注(非必填)" }
+            { "rule": "mobile", "on_invalid": "clear", "copy_to": "车辆备注(非必填)", "copy_label": "原手机号" }
+          ]
+        },
+        "门牌号(非必填)": {
+          "validators": [
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "copy_to": "车辆备注(非必填)", "copy_label": "原门牌号" }
+          ]
+        },
+        "车位号(非必填)": {
+          "validators": [
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "copy_to": "车辆备注(非必填)", "copy_label": "原车位号" }
           ]
         }
       },

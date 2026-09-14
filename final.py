@@ -164,7 +164,7 @@ def _capacity_is_valid(value):
     return not pd.isna(f)
 
 
-def _check_rule(rule, series):
+def _check_rule(rule, series, vconf=None):
     """单规则校验，返回 Series（True=有效）。
 
     非必填语义：plate / mobile / datetime 规则对空值放行，
@@ -172,8 +172,9 @@ def _check_rule(rule, series):
     """
     if rule == 'required':
         return series.map(lambda x: _norm(x) != '')
-    if rule == 'maxlen15':
-        return series.map(lambda x: len(_norm(x)) <= 15)
+    if rule == 'maxlen':
+        n = (vconf or {}).get('max_len', 15)
+        return series.map(lambda x: len(_norm(x)) <= n)
     if rule == 'plate':
         def _plate_ok(x):
             if _norm(x) == '':
@@ -417,7 +418,7 @@ def run_scheme(df, scheme, header_idx=0):
         for vconf in conf.get('validators', []):
             rule = vconf.get('rule')
             action = vconf.get('on_invalid', 'mark')
-            invalid = ~_check_rule(rule, out[col])
+            invalid = ~_check_rule(rule, out[col], vconf)
             if not invalid.any():
                 continue
             orig_rows = out.loc[invalid, '__orig_row'].tolist()
@@ -437,31 +438,44 @@ def run_scheme(df, scheme, header_idx=0):
                 copy_to = vconf.get('copy_to')
                 if copy_to and copy_to in out.columns:
                     out[copy_to] = out[copy_to].astype(object)  # 兼容空备注列（float64 → object）
+                    copy_label = vconf.get('copy_label', '原值')
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
-                        new_remark = f'{prev}；原手机号：{full}' if prev else f'原手机号：{full}'
+                        new_remark = f'{prev}；{copy_label}：{full}' if prev else f'{copy_label}：{full}'
                         out.at[label, copy_to] = new_remark
                         cell_changes[(r, copy_to)] = new_remark
-            elif action == 'truncate15':
+            elif action == 'truncate':
+                n = vconf.get('max_len', 15)
                 originals = out.loc[invalid, col].map(lambda x: _norm(x))
-                new_vals = originals.map(lambda x: x[:15])
+                new_vals = originals.map(lambda x: x[:n])
                 out.loc[invalid, col] = new_vals
                 truncated += len(orig_rows)
-                red_cells.setdefault(col, set()).update(orig_rows)  # 姓名超15字标红（原始需求）
-                for r, v in zip(orig_rows, new_vals.tolist()):
-                    cell_changes[(r, col)] = v
-                    issue_items.append(('姓名超15字', r, letter))
-                # 截断前先把完整姓名复制到备注列，避免丢失重要信息
+                if vconf.get('red'):  # 姓名超长等要求标红的场景
+                    red_cells.setdefault(col, set()).update(orig_rows)
+                # 截断前先把完整内容复制到备注列，避免丢失重要信息
                 copy_to = vconf.get('copy_to')
+                copy_label = vconf.get('copy_label', '原值')
                 if copy_to and copy_to in out.columns:
                     out[copy_to] = out[copy_to].astype(object)  # 兼容空备注列（float64 → object）
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
-                        new_remark = f'{prev}；原姓名：{full}' if prev else f'原姓名：{full}'
+                        new_remark = f'{prev}；{copy_label}：{full}' if prev else f'{copy_label}：{full}'
                         out.at[label, copy_to] = new_remark
                         cell_changes[(r, copy_to)] = new_remark
+                # 摘要标签动态化：姓名超15字 / 门牌号超20字 / 车位号超20字
+                if '车主姓名' in col:
+                    trunc_label = f'姓名超{n}字'
+                elif '门牌号' in col:
+                    trunc_label = f'门牌号超{n}字'
+                elif '车位号' in col:
+                    trunc_label = f'车位号超{n}字'
+                else:
+                    trunc_label = f'{col}超{n}字'
+                for r, v in zip(orig_rows, new_vals.tolist()):
+                    cell_changes[(r, col)] = v
+                    issue_items.append((trunc_label, r, letter))
             elif action == 'fill_from_plate':
                 source_col = vconf.get('source_col')
                 if source_col and source_col in out.columns:
@@ -520,8 +534,10 @@ def run_scheme(df, scheme, header_idx=0):
         grouped.setdefault('车牌O/I已替换', []).append((r, letter, old, new))
 
     issues = []
-    for label in ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字', '姓名区分',
-                  '车牌无效', '车牌重复', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']:
+    order = ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字', '姓名区分',
+             '车牌无效', '车牌重复', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']
+    # 动态标签（如 门牌号超20字/车位号超20字）跟在白名单之后按序输出
+    for label in order + [l for l in grouped if l not in order]:
         if label not in grouped:
             continue
         rows = sorted(grouped[label])
@@ -906,6 +922,7 @@ def main():
                        '非"一位多车"的行车牌数超过车位数时标红提示车位不足；'
                        '无效手机号已清空（原值复制到备注列）；'
                        '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
+                       '门牌号/车位号超20字已截断（原值复制到备注列）；'
                        '同名同手机号且结束时间不同的行，第二个起姓名加数字1、2…区分（避免误判一位多车）；'
                        '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
 
