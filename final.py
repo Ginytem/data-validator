@@ -997,27 +997,31 @@ def main():
     if has_run:
         summary = st.session_state.get('scheme_summary')
         out = st.session_state['scheme_out']
-        st.write('校验摘要：')
-        if summary and summary['issues']:
-            for it in summary['issues']:
-                st.write(f"{it['label']}：{'、'.join(it['cells'])}")
-        else:
-            st.write('未发现不符合规则的数据。')
-        # 修改说明：默认隐藏，小眼睛点击展开
-        if 'show_note' not in st.session_state:
-            st.session_state['show_note'] = False
-        if st.button('修改说明', icon='👁', key='note_toggle'):
-            st.session_state['show_note'] = not st.session_state['show_note']
-        if st.session_state['show_note']:
-            st.caption('修改说明：含字母O/I的车牌已自动替换为0/1（摘要中列出替换位置）；'
-                       '无效车牌（省份/位数不对）已标红；一个单元格含多个车牌（逗号分隔）时逐个校验，'
-                       '重复车牌按车位数容量优先分配去重（摘要中列出剔除位置与保留位置）；'
-                       '非"一位多车"的行车牌数超过车位数时标红提示车位不足；'
-                       '无效手机号已清空（原值复制到备注列）；'
-                       '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
-                       '门牌号/车位号超20字已截断（原值复制到备注列）；'
-                       '同名同手机号且"一位多车=是"的行结束时间不同时，第二个起姓名加数字1、2…区分（避免误判一位多车）；'
-                       '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
+        # 校验摘要/修改说明：默认不展示（避免使用者看到内部处理逻辑）；
+        # 设置环境变量 SHOW_VALIDATION_SUMMARY=1 后显示，便于管理员查看
+        show_detail = os.environ.get('SHOW_VALIDATION_SUMMARY', '') == '1'
+        if show_detail:
+            st.write('校验摘要：')
+            if summary and summary['issues']:
+                for it in summary['issues']:
+                    st.write(f"{it['label']}：{'、'.join(it['cells'])}")
+            else:
+                st.write('未发现不符合规则的数据。')
+            # 修改说明：默认隐藏，小眼睛点击展开
+            if 'show_note' not in st.session_state:
+                st.session_state['show_note'] = False
+            if st.button('修改说明', icon='👁', key='note_toggle'):
+                st.session_state['show_note'] = not st.session_state['show_note']
+            if st.session_state['show_note']:
+                st.caption('修改说明：含字母O/I的车牌已自动替换为0/1（摘要中列出替换位置）；'
+                           '无效车牌（省份/位数不对）已标红；一个单元格含多个车牌（逗号分隔）时逐个校验，'
+                           '重复车牌按车位数容量优先分配去重（摘要中列出剔除位置与保留位置）；'
+                           '非"一位多车"的行车牌数超过车位数时标红提示车位不足；'
+                           '无效手机号已清空（原值复制到备注列）；'
+                           '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
+                           '门牌号/车位号超20字已截断（原值复制到备注列）；'
+                           '同名同手机号且"一位多车=是"的行结束时间不同时，第二个起姓名加数字1、2…区分（避免误判一位多车）；'
+                           '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
         st.write(out)
