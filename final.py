@@ -7,6 +7,7 @@ import os
 import datetime
 import numpy as np
 import openpyxl
+from copy import copy
 from openpyxl.styles import PatternFill
 
 
@@ -522,6 +523,16 @@ def run_scheme(df, scheme, header_idx=0):
     if delete_rows:
         out = out[~out['__orig_row'].isin(delete_rows)].copy().reset_index(drop=True)
 
+    # 4.5) 问题行集中到末尾：有标红的行（需人工核对修改）排在最后，正常行保持原序在前。
+    #      自动修复的行（时间归一化 / O/I 替换 / 去重 / 改名等，摘要已提示）不视为问题行
+    problem_rows = set()
+    for rows in red_cells.values():
+        problem_rows.update(rows)
+    if problem_rows:
+        normal = out[~out['__orig_row'].isin(problem_rows)]
+        problem = out[out['__orig_row'].isin(problem_rows)]
+        out = pd.concat([normal, problem], ignore_index=True)
+
     # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身、O/I 替换提示除外）
     grouped = {}
     for label, r, letter in issue_items:
@@ -558,18 +569,21 @@ def run_scheme(df, scheme, header_idx=0):
         'issues': issues,
         'cleared': cleared,
         'truncated': truncated,
+        'order': out['__orig_row'].tolist(),  # 重排后行顺序（原文件行号），导出时按此移动行
     }
     return result, red_cells, cell_changes, sorted(delete_rows), summary
 
 
 # ============ 导出（在原文件上直接修改，保留模板格式） ============
 
-def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_changes, delete_rows):
+def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_changes, delete_rows,
+                         order=None, header_row=2):
     """在用户上传的原文件上直接修改：
     - 保留第 1 行说明行、表头、列宽、合并单元格等全部原格式
     - 无效单元格标红（FFC7CE）
     - 无效手机号清空、姓名截断、时间归一化写回原单元格
     - 无效车牌 / 重复车牌所在行整行删除
+    - order 非空时：按新顺序移动行（问题行集中到末尾，值/样式/行高跟随移动）
     """
     wb = openpyxl.load_workbook(io.BytesIO(data_bytes))
     ws = wb[sheet_name]
@@ -588,9 +602,39 @@ def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_change
             if r not in delete_rows:
                 ws.cell(row=r, column=col_pos[col]).fill = red
 
-    # 3) 整行删除（从下往上删，避免行号偏移）
-    for r in sorted(delete_rows, reverse=True):
-        ws.delete_rows(r)
+    # 3) 按新顺序移动数据行（问题行集中到末尾；删除行被排除，原位置被后续行覆盖或清空）
+    if order:
+        first_data_row = header_row + 1  # 表头下一行是数据起始
+        total = len(order) + len(delete_rows)
+        last_data_row = first_data_row + total - 1
+        # 读取数据区每行的值 + 样式 + 行高
+        row_content = {}
+        for src in range(first_data_row, last_data_row + 1):
+            vals = [ws.cell(row=src, column=c).value for c in range(1, ws.max_column + 1)]
+            styles = [copy(ws.cell(row=src, column=c)._style) for c in range(1, ws.max_column + 1)]
+            rh = ws.row_dimensions[src].height
+            row_content[src] = (vals, styles, rh)
+        # 按新顺序写回数据区前部
+        for i, orig in enumerate(order):
+            target = first_data_row + i
+            vals, styles, rh = row_content[orig]
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(row=target, column=c)
+                cell.value = vals[c - 1]
+                cell._style = styles[c - 1]
+            if rh is not None:
+                ws.row_dimensions[target].height = rh
+        # 数据区剩余行（被删除行 / 未覆盖位置）清空值并恢复默认样式与行高
+        for leftover in range(first_data_row + len(order), last_data_row + 1):
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(row=leftover, column=c)
+                cell.value = None
+                cell.style = 'Normal'
+            ws.row_dimensions[leftover].height = None
+    else:
+        # 无重排：直接删除整行（从下往上删，避免行号偏移）
+        for r in sorted(delete_rows, reverse=True):
+            ws.delete_rows(r)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -844,17 +888,18 @@ def main():
             header_idx = st.session_state['scheme_header']
 
             if uploaded_file.name.lower().endswith('.xlsx'):
-                # 在原文件上直接修改：保留说明行、表头、列宽等全部格式
-                buf = export_modified_file(raw, sheet, col_pos, red_cells, cell_changes, delete_rows)
+                # 在原文件上直接修改：保留说明行、表头、列宽等全部格式；
+                # 问题行集中到文件末尾（order 为重排后的原文件行号顺序）
+                order = st.session_state.get('scheme_summary', {}).get('order')
+                buf = export_modified_file(raw, sheet, col_pos, red_cells, cell_changes, delete_rows,
+                                           order=order, header_row=header_idx + 1)
             else:
                 # 非 xlsx（xls/csv）兜底：重建表格导出
-                first_data_row = header_idx + 2
-                all_orig = list(range(first_data_row, first_data_row + len(df)))
-                kept = [r for r in all_orig if r not in set(delete_rows)]
-                label_map = {r: i for i, r in enumerate(kept)}
+                order = st.session_state.get('scheme_summary', {}).get('order') or []
+                pos_map = {r: i for i, r in enumerate(order)}
                 fallback_red = {}
                 for col, rows in red_cells.items():
-                    ls = [label_map[r] for r in rows if r in label_map]
+                    ls = [pos_map[r] for r in rows if r in pos_map]
                     if ls:
                         fallback_red[col] = set(ls)
                 buf = export_result_file(out, fallback_red, sheet_name=sheet)

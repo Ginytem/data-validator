@@ -9,6 +9,7 @@ Data-Validator is a Python-based tool that uses Streamlit for validating data in
 - **预设方案校验**：上传文件后按表头自动匹配方案（也可手动选择），一键完成多列校验。
 - 内置校验规则：必填检测、姓名长度（≤15字）、车牌号、11位手机号、日期时间解析。
 - 单个下载文件同时完成：无效单元格标红、无效手机号清空、时间归一化为 yyyy-mm-dd、车牌重复行删除。
+- 有标红的行（需人工核对修改）自动集中到文件末尾，正常行保持原序在前，一眼定位问题数据。
 - 保留手动模式：逐列选择校验器（Email / EID / Mobile No / License Plate / Date / DateTime / Custom）。
 
 ## Installation
