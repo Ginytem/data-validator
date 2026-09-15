@@ -936,7 +936,10 @@ def main():
 
     # 校验操作密码（可选）：设置环境变量 VERIFY_PASSWORD（或 .streamlit/secrets.toml 的 VERIFY_PASSWORD）后，
     # 点击"开始校验"需先通过密码验证才执行；未配置密码则保持原行为直接校验
-    auth_password = os.environ.get('VERIFY_PASSWORD') or st.secrets.get('VERIFY_PASSWORD', '')
+    try:
+        auth_password = os.environ.get('VERIFY_PASSWORD') or st.secrets.get('VERIFY_PASSWORD', '')
+    except Exception:
+        auth_password = os.environ.get('VERIFY_PASSWORD', '')
 
     if run_clicked:
         if auth_password:
