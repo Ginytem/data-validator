@@ -929,7 +929,35 @@ def main():
         else:
             st.caption('校验完成后可在此下载处理好的文件')
 
+    # 校验操作密码（可选）：设置环境变量 VERIFY_PASSWORD（或 .streamlit/secrets.toml 的 VERIFY_PASSWORD）后，
+    # 点击"开始校验"需先通过密码验证才执行；未配置密码则保持原行为直接校验
+    auth_password = os.environ.get('VERIFY_PASSWORD') or st.secrets.get('VERIFY_PASSWORD', '')
+
     if run_clicked:
+        if auth_password:
+            st.session_state['need_auth'] = True
+            st.rerun()
+        else:
+            st.session_state['do_run'] = True
+            st.rerun()
+
+    if st.session_state.get('need_auth'):
+        with st.container(border=True):
+            st.caption('本次校验需要权限验证，请输入校验密码')
+            pwd_input = st.text_input('校验密码', type='password', key='auth_pwd_input')
+            ac1, ac2 = st.columns(2)
+            if ac1.button('确认', type='primary', use_container_width=True):
+                if pwd_input == auth_password:
+                    st.session_state['need_auth'] = False
+                    st.session_state['do_run'] = True
+                    st.rerun()
+                else:
+                    st.error('密码错误，请重试')
+            if ac2.button('取消', use_container_width=True):
+                st.session_state['need_auth'] = False
+                st.rerun()
+
+    if st.session_state.pop('do_run', False):
         out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx)
 
         # 列名 -> 列号（用于在原文件上定位单元格）
