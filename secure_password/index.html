@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #pw {
+    flex: 1 1 180px;
+    min-width: 0;
+    padding: 9px 12px;
+    font-size: 14px;
+    color: #262730;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    outline: none;
+    -webkit-text-security: disc;   /* 字符显示为圆点，但不属于密码框，浏览器不会弹出保存密码 */
+    text-security: disc;
+  }
+  #pw::placeholder { color: #8a8f98; -webkit-text-security: none; text-security: none; }
+  #pw:focus { border-color: #4b8bf5; box-shadow: 0 0 0 2px rgba(75,139,245,.18); }
+  button {
+    padding: 8px 18px;
+    font-size: 14px;
+    line-height: 1.4;
+    border-radius: 8px;
+    border: 1px solid #d0d7de;
+    background: #fff;
+    color: #262730;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover { background: #f3f4f6; }
+  #ok { background: #ff4b4b; border-color: #ff4b4b; color: #fff; font-weight: 600; }
+  #ok:hover { background: #e04343; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <input type="text" id="pw" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="secure_pw_input" placeholder="请输入校验密码">
+    <button id="ok" type="button">确认</button>
+    <button id="cancel" type="button">取消</button>
+  </div>
+  <script>
+    (function () {
+      var parentWindow = window.parent;
+      function send(type, data) {
+        var msg = { isStreamlitMessage: true, type: type, apiVersion: 1 };
+        if (data) { for (var k in data) { msg[k] = data[k]; } }
+        parentWindow.postMessage(msg, '*');
+      }
+      send('streamlit:componentReady');
+      send('streamlit:setFrameHeight', { height: 64 });
+
+      var pw = document.getElementById('pw');
+      var ok = document.getElementById('ok');
+      var cancel = document.getElementById('cancel');
+
+      function doConfirm() {
+        if (!pw.value) { return; }
+        send('streamlit:setComponentValue', { value: { action: 'confirm', pw: pw.value } });
+      }
+      ok.addEventListener('click', doConfirm);
+      cancel.addEventListener('click', function () {
+        send('streamlit:setComponentValue', { value: { action: 'cancel' } });
+      });
+      pw.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); doConfirm(); }
+      });
+
+      // 接收 Python 传入的 props：reset_token 变化时清空输入并重置组件值
+      var lastReset = null;
+      window.addEventListener('message', function (e) {
+        var d = e.data;
+        if (d && d.type === 'streamlit:render') {
+          var args = d.args || {};
+          if (args.reset_token && args.reset_token !== lastReset) {
+            lastReset = args.reset_token;
+            pw.value = '';
+            send('streamlit:setComponentValue', { value: null });
+          }
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

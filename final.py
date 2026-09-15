@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import re
 import io
 import json
@@ -26,6 +27,10 @@ MOBILE_RE = re.compile(r'^1[3-9]\d{9}$')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEMES_PATH = os.path.join(BASE_DIR, 'schemes.json')
+
+# 安全密码输入组件：普通文本框 + 字符圆点显示，浏览器不识别为密码框、不弹"保存密码"
+_PW_COMPONENT = components.declare_component(
+    'secure_password_input', path=os.path.join(BASE_DIR, 'secure_password'))
 
 
 # Normalize cell value to a clean string before regex matching:
@@ -944,18 +949,26 @@ def main():
     if st.session_state.get('need_auth'):
         with st.container(border=True):
             st.caption('本次校验需要权限验证，请输入校验密码')
-            pwd_input = st.text_input('校验密码', type='password', key='auth_pwd_input')
-            ac1, ac2 = st.columns(2)
-            if ac1.button('确认', type='primary', use_container_width=True):
-                if pwd_input == auth_password:
+            # 安全密码组件：普通输入框 + 圆点显示，浏览器不识别为密码框、不弹保存密码
+            reset_token = st.session_state.get('auth_reset_token', 0)
+            comp_res = _PW_COMPONENT(reset_token=reset_token, key='auth_pw_comp')
+            if comp_res:
+                if comp_res.get('action') == 'confirm':
+                    if comp_res.get('pw') == auth_password:
+                        st.session_state['need_auth'] = False
+                        st.session_state['auth_err'] = False
+                        st.session_state['do_run'] = True
+                        st.rerun()
+                    else:
+                        st.session_state['auth_err'] = True
+                        st.session_state['auth_reset_token'] = reset_token + 1
+                        st.rerun()
+                elif comp_res.get('action') == 'cancel':
                     st.session_state['need_auth'] = False
-                    st.session_state['do_run'] = True
+                    st.session_state['auth_err'] = False
                     st.rerun()
-                else:
-                    st.error('密码错误，请重试')
-            if ac2.button('取消', use_container_width=True):
-                st.session_state['need_auth'] = False
-                st.rerun()
+            if st.session_state.get('auth_err'):
+                st.error('密码错误，请重试')
 
     if st.session_state.pop('do_run', False):
         out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx)
