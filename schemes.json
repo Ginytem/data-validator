@@ -36,7 +36,7 @@
         "车主姓名（必填项）": {
           "validators": [
             { "rule": "required", "on_invalid": "fill_from_plate", "source_col": "车牌号（必填项）" },
-            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 15, "red": true, "copy_to": "车辆备注(非必填)", "copy_label": "原姓名" }
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 15, "copy_to": "车辆备注(非必填)", "copy_label": "原姓名" }
           ]
         },
         "车位数（必填项）": {
