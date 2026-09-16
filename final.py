@@ -1028,8 +1028,33 @@ def main_page():
 
 
 def help_page():
-    """使用说明页：展示校验规则与处理逻辑，供使用者查看"""
+    """使用说明页：展示校验规则与处理逻辑，管理员自用（访问需密码 258）"""
     st.set_page_config(page_title='使用说明 - Data Validator')
+
+    HELP_PASSWORD = '258'  # /help 页面访问密码
+
+    if not st.session_state.get('help_auth_ok'):
+        st.title('使用说明')
+        with st.container(border=True):
+            st.caption('本页面为管理员专享，请输入访问密码')
+            reset_token = st.session_state.get('help_auth_reset', 0)
+            comp_res = _PW_COMPONENT(reset_token=reset_token, key='help_pw_comp')
+            if comp_res:
+                if comp_res.get('action') == 'confirm':
+                    if comp_res.get('pw') == HELP_PASSWORD:
+                        st.session_state['help_auth_ok'] = True
+                        st.session_state['help_auth_err'] = False
+                        st.rerun()
+                    else:
+                        st.session_state['help_auth_err'] = True
+                        st.session_state['help_auth_reset'] = reset_token + 1
+                        st.rerun()
+                elif comp_res.get('action') == 'cancel':
+                    st.rerun()
+            if st.session_state.get('help_auth_err'):
+                st.error('密码错误，请重试')
+        st.stop()
+
     st.title('使用说明')
     st.caption('数据校验工具 · 校验规则与处理方式说明')
 
