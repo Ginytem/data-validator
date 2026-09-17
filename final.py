@@ -9,7 +9,8 @@ import datetime
 import numpy as np
 import openpyxl
 from copy import copy
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font, Border, Alignment
+from openpyxl.utils import get_column_letter
 
 
 # ============ 内置校验规则 ============
@@ -722,21 +723,32 @@ def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_change
     ws = wb[sheet_name]
     red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
 
-    # 0) 统一数据区样式：以数据区第一个非空行（模板样式）为基准，
-    #    将字体/边框/对齐/底纹应用到整个数据区，保证导出文件样式统一美观
-    #    （被删除/清空的行同样保留统一边框，不出现无边框空洞）
+    # 模板样式常量（对齐「月租车辆导入模板」：数据行宋体11、无边框、无填充、
+    # 左对齐垂直居中、时间列水平居中；16 列列宽；说明行/表头行行高）
+    TEMPLATE_COL_WIDTHS = [38.1, 28.9, 13.0, 35.2, 32.8, 13.0, 31.8, 35.9, 46.8, 42.1,
+                           30.7, 30.6, 35.8, 18.3, 19.3, 22.5]
+    time_cols = {col_pos[col] for col in col_pos if '时间' in col}
+
+    # 0) 统一数据区样式为模板格式（不依赖上传文件自身样式，保证导出美观一致）：
+    #    字体宋体11、无边框、无填充、左对齐垂直居中（时间列水平居中）、列宽按模板
     first_data_row = header_row + 1
-    base_row = None
-    for r in range(first_data_row, ws.max_row + 1):
-        if any(ws.cell(row=r, column=c).value not in (None, '') for c in range(1, ws.max_column + 1)):
-            base_row = r
-            break
-    if base_row is None:
-        base_row = first_data_row
-    base_styles = [copy(ws.cell(row=base_row, column=c)._style) for c in range(1, ws.max_column + 1)]
     for r in range(first_data_row, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
-            ws.cell(row=r, column=c)._style = copy(base_styles[c - 1])
+            cell = ws.cell(row=r, column=c)
+            cell.font = Font(name='宋体', size=11)
+            cell.border = Border()
+            cell.fill = PatternFill(fill_type=None)
+            cell.alignment = Alignment(horizontal='center' if c in time_cols else 'left',
+                                       vertical='center', wrap_text=False)
+    for i, w in enumerate(TEMPLATE_COL_WIDTHS):
+        if i < ws.max_column:
+            ws.column_dimensions[get_column_letter(i + 1)].width = w
+    if header_row >= 2:
+        ws.row_dimensions[1].height = 37
+    ws.row_dimensions[header_row].height = 34
+
+    # 数据区样式快照（供被删除/清空的行复用，保持统一边框与格式）
+    base_styles = [copy(ws.cell(row=first_data_row, column=c)._style) for c in range(1, ws.max_column + 1)]
 
     # 1) 写回修复值（清空 / 截断 / 时间归一化）
     for (orig_row, col), val in cell_changes.items():
