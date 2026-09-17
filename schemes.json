@@ -77,12 +77,12 @@
         },
         "门牌号(非必填)": {
           "validators": [
-            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "copy_to": "车辆备注(非必填)", "copy_label": "原门牌号" }
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "ignore_space": true, "copy_to": "车辆备注(非必填)", "copy_label": "原门牌号" }
           ]
         },
         "车位号(非必填)": {
           "validators": [
-            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "copy_to": "车辆备注(非必填)", "copy_label": "原车位号" }
+            { "rule": "maxlen", "on_invalid": "truncate", "max_len": 20, "ignore_space": true, "copy_to": "车辆备注(非必填)", "copy_label": "原车位号" }
           ]
         }
       },

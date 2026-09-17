@@ -109,19 +109,23 @@ def _col_letter(idx1):
 # ============ 多车牌支持（一个单元格多个车牌，逗号/顿号/分号/空白分隔） ============
 
 def _split_plates_detailed(value):
-    """拆分单元格内的多个车牌。
+    """拆分单元格内的多个车牌（多个车牌用英文逗号隔开，兼容顿号/分号）。
 
     返回 (plates, dup_in_cell)：
-    - plates：去重后（保留首个出现顺序）的车牌列表（已转大写、去空格）
+    - plates：去重后（保留首个出现顺序）的车牌列表（已转大写、去首尾空格；不做符号清理）
     - dup_in_cell：该格内重复出现的车牌集合（行内重复，保留一个）
     空值/空串返回 ([], set())。
+
+    注意：此处只做拆分，不自动移除符号/空格——单车牌的特殊符号由
+    run_scheme 步骤 0.5 自动清理；多车牌（含分隔符）交给拆分后的逐个校验，
+    不正确的标红（用户规范录入多个车牌，带符号视为录入错误）。
     """
     if pd.isna(value):
         return [], set()
     s = str(value).strip()
     if not s:
         return [], set()
-    parts = [p.strip().upper() for p in re.split(r'[,，、;；\s]+', s)]
+    parts = [p.strip().upper() for p in re.split(r'[,，、;；]+', s)]
     plates, dup = [], set()
     for p in parts:
         if not p:
@@ -180,6 +184,11 @@ def _check_rule(rule, series, vconf=None):
         return series.map(lambda x: _norm(x) != '')
     if rule == 'maxlen':
         n = (vconf or {}).get('max_len', 15)
+        # 空格是否视为字符由配置决定：
+        # 姓名（默认）空格算字符（连续超4个已在预处理压缩为2个）；门牌号/车位号等
+        # 配置 ignore_space=true 的列，空格不视为字符（长度按移除空白后计算）
+        if (vconf or {}).get('ignore_space'):
+            return series.map(lambda x: len(re.sub(r'\s+', '', _norm(x))) <= n)
         return series.map(lambda x: len(_norm(x)) <= n)
     if rule == 'plate':
         def _plate_ok(x):
@@ -191,7 +200,11 @@ def _check_rule(rule, series, vconf=None):
             return all(PLATE_RE.match(p) for p in plates)
         return series.map(_plate_ok)
     if rule == 'mobile':
-        return series.map(lambda x: _norm(x) == '' or bool(MOBILE_RE.match(_norm(x))))
+        # 空格不视为字符：匹配前移除所有空白（"138 1234 5678" 视为有效 11 位号码）
+        def _mobile_ok(x):
+            s = re.sub(r'\s+', '', _norm(x))
+            return s == '' or bool(MOBILE_RE.match(s))
+        return series.map(_mobile_ok)
     if rule == 'datetime':
         empty = series.map(lambda x: _norm(x) == '')
         return empty | _parse_dates(series).notna()
@@ -294,6 +307,12 @@ def run_scheme(df, scheme, header_idx=0):
     cleared = 0
     truncated = 0
 
+    # 各列原始值备份（用于清空/截断/多值提取时把最原始的完整内容复制到备注列留存，方便后期核对）
+    col_originals = {}
+    for col in columns_cfg:
+        if col in out.columns:
+            col_originals[col] = {idx: str(out.at[idx, col]) for idx in out.index}
+
     # 0) 车牌 O/I 字母自动替换为 0/1（修复），替换后再拆分、去重和校验
     for col, conf in columns_cfg.items():
         if col not in out.columns or conf.get('transform') != 'plate_o_i_fix':
@@ -309,6 +328,108 @@ def run_scheme(df, scheme, header_idx=0):
                 oi_fix_items.append((r, letter, _norm(old), new))
             out[col] = out[col].astype(object)
             out.loc[changed, col] = vals[changed]
+
+    # 0.5) 车牌符号清理：仅对"单车牌"（不含英文逗号/顿号/分号等分隔符）自动删除特殊符号
+    #      （"渝A.52363" → "渝A52363"、"宁B•A2K52" → "宁BA2K52"）；
+    #      多车牌（含分隔符）不做符号自动清理，由拆分后的逐个校验判断，不正确的标红
+    PLATE_SYMBOL_CLEAN = re.compile(r'[^%sA-Z0-9]' % PLATE_PROVINCES)
+    PLATE_SEP_RE = re.compile(r'[,，、;；]')
+    for col, conf in columns_cfg.items():
+        if col not in out.columns or conf.get('transform') != 'plate_o_i_fix':
+            continue
+
+        def _clean_plate_cell(v):
+            s = _norm(v).upper()
+            if not s or PLATE_SEP_RE.search(s):
+                return s, False  # 空值或多车牌（含分隔符）：不自动清理符号
+            new = PLATE_SYMBOL_CLEAN.sub('', s)
+            if new == s:
+                return s, False
+            return new, True
+
+        cleaned = out[col].map(_clean_plate_cell)
+        changed_mask = cleaned.map(lambda x: x[1])
+        if changed_mask.any():
+            letter = _col_letter(list(out.columns).index(col) + 1)
+            for r, old, new in zip(out.loc[changed_mask, '__orig_row'].tolist(),
+                                   out.loc[changed_mask, col].tolist(),
+                                   cleaned[changed_mask].map(lambda x: x[0]).tolist()):
+                cell_changes[(r, col)] = new
+                issue_items.append(('车牌符号已清理', r, letter))
+            out[col] = out[col].astype(object)
+            out.loc[changed_mask, col] = cleaned[changed_mask].map(lambda x: x[0])
+
+    # 0.6) 姓名/手机号空格处理：
+    #      - 姓名：连续超过 4 个空格时压缩为 2 个（其余空格保留，空格是姓名的有效字符），
+    #        压缩后字符仍超限的，后续由 maxlen 截断（删减后段 + 复制到备注列）
+    #      - 手机号：空格视为无效字符，直接移除
+    name_col = next((c for c in columns_cfg if '车主姓名' in c), None)
+    phone_col = next((c for c in columns_cfg if '手机号' in c), None)
+    if name_col and name_col in out.columns:
+        def _compress_name(x):
+            s = _norm(x).replace('\u3000', ' ')  # 全角空格转半角
+            return re.sub(r' {5,}', '  ', s)     # 连续超过4个（≥5）→ 保留2个
+
+        vals = out[name_col].map(_compress_name)
+        changed = out[name_col].map(lambda x: _norm(x)) != vals
+        if changed.any():
+            letter = _col_letter(list(out.columns).index(name_col) + 1)
+            for r, old, new in zip(out.loc[changed, '__orig_row'].tolist(),
+                                   out.loc[changed, name_col].tolist(),
+                                   vals[changed].tolist()):
+                cell_changes[(r, name_col)] = new
+                issue_items.append(('姓名空格已压缩', r, letter))
+            out[name_col] = out[name_col].astype(object)
+            out.loc[changed, name_col] = vals[changed]
+    if phone_col and phone_col in out.columns:
+        vals = out[phone_col].map(lambda x: re.sub(r'\s+', '', _norm(x)))
+        changed = out[phone_col].map(lambda x: _norm(x)) != vals
+        if changed.any():
+            letter = _col_letter(list(out.columns).index(phone_col) + 1)
+            for r, old, new in zip(out.loc[changed, '__orig_row'].tolist(),
+                                   out.loc[changed, phone_col].tolist(),
+                                   vals[changed].tolist()):
+                cell_changes[(r, phone_col)] = new
+                issue_items.append(('手机号空格已清理', r, letter))
+            out[phone_col] = out[phone_col].astype(object)
+            out.loc[changed, phone_col] = vals[changed]
+
+    # 0.7) 手机号多值处理：一个单元格可能出现多个手机号（逗号/顿号/分号/空格分隔），
+    #      提取第一个有效手机号（11 位，1[3-9] 开头）保留，完整原值复制到备注列留存；
+    #      拆不出有效号码的保持原值，交给后续 mobile 规则校验（清空 + 原值复制备注）
+    if phone_col and phone_col in out.columns:
+        remark_col = None
+        for vconf in columns_cfg.get(phone_col, {}).get('validators', []):
+            if vconf.get('copy_to'):
+                remark_col = vconf['copy_to']
+        letter = _col_letter(list(out.columns).index(phone_col) + 1)
+
+        def _pick_phone(v):
+            s = _norm(v)
+            if not s:
+                return s, '', False
+            parts = [p.strip() for p in re.split(r'[,，、;；\s]+', s) if p.strip()]
+            for p in parts:
+                if MOBILE_RE.match(p):
+                    return p, s, True
+            return s, '', False
+
+        picked = out[phone_col].map(_pick_phone)
+        for idx in out.index:
+            new_val, orig_full, is_changed = picked.loc[idx]
+            if not is_changed or _norm(out.at[idx, phone_col]) == new_val:
+                continue
+            r = out.at[idx, '__orig_row']
+            out.at[idx, phone_col] = new_val
+            cell_changes[(r, phone_col)] = new_val
+            if remark_col and remark_col in out.columns:
+                out[remark_col] = out[remark_col].astype(object)
+                prev = _norm(out.at[idx, remark_col])
+                raw_full = col_originals.get(phone_col, {}).get(idx, orig_full)
+                new_remark = f'{prev}；原手机号：{raw_full}' if prev else f'原手机号：{raw_full}'
+                out.at[idx, remark_col] = new_remark
+                cell_changes[(r, remark_col)] = new_remark
+            issue_items.append(('手机号多值已保留首个有效', r, letter))
 
     # 1) 多车牌去重：拆分后按车位数容量优先分配，剔除重复子车牌（不删行），
     #    分配后整格为空的行由第 2 步"车牌为空"删除
@@ -444,7 +565,7 @@ def run_scheme(df, scheme, header_idx=0):
                 for r, v in zip(orig_rows, originals.tolist()):
                     cell_changes[(r, col)] = None
                     issue_items.append(('无效手机号', r, letter))
-                # 清空前把原值复制到备注列，避免丢失信息
+                # 清空前把原始完整值复制到备注列，避免丢失信息（用未清理的最原始值）
                 copy_to = vconf.get('copy_to')
                 if copy_to and copy_to in out.columns:
                     out[copy_to] = out[copy_to].astype(object)  # 兼容空备注列（float64 → object）
@@ -452,7 +573,8 @@ def run_scheme(df, scheme, header_idx=0):
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
-                        new_remark = f'{prev}；{copy_label}：{full}' if prev else f'{copy_label}：{full}'
+                        raw_full = col_originals.get(col, {}).get(label, full)
+                        new_remark = f'{prev}；{copy_label}：{raw_full}' if prev else f'{copy_label}：{raw_full}'
                         out.at[label, copy_to] = new_remark
                         cell_changes[(r, copy_to)] = new_remark
             elif action == 'truncate':
@@ -463,7 +585,7 @@ def run_scheme(df, scheme, header_idx=0):
                 truncated += len(orig_rows)
                 if vconf.get('red'):  # 姓名超长等要求标红的场景
                     red_cells.setdefault(col, set()).update(orig_rows)
-                # 截断前先把完整内容复制到备注列，避免丢失重要信息
+                # 截断前先把原始完整内容复制到备注列，避免丢失重要信息（用未清理的最原始值）
                 copy_to = vconf.get('copy_to')
                 copy_label = vconf.get('copy_label', '原值')
                 if copy_to and copy_to in out.columns:
@@ -471,7 +593,8 @@ def run_scheme(df, scheme, header_idx=0):
                     for label, full in zip(out.index[invalid].tolist(), originals.tolist()):
                         r = out.at[label, '__orig_row']
                         prev = _norm(out.at[label, copy_to])
-                        new_remark = f'{prev}；{copy_label}：{full}' if prev else f'{copy_label}：{full}'
+                        raw_full = col_originals.get(col, {}).get(label, full)
+                        new_remark = f'{prev}；{copy_label}：{raw_full}' if prev else f'{copy_label}：{raw_full}'
                         out.at[label, copy_to] = new_remark
                         cell_changes[(r, copy_to)] = new_remark
                 # 摘要标签动态化：姓名超15字 / 门牌号超20字 / 车位号超20字
@@ -554,8 +677,9 @@ def run_scheme(df, scheme, header_idx=0):
         grouped.setdefault('车牌O/I已替换', []).append((r, letter, old, new))
 
     issues = []
-    order = ['车牌O/I已替换', '无效手机号', '姓名缺失已用车牌填充', '姓名超15字', '姓名区分',
-             '车牌无效', '车牌重复', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']
+    order = ['车牌O/I已替换', '车牌符号已清理', '姓名空格已压缩', '手机号空格已清理', '手机号多值已保留首个有效', '无效手机号',
+             '姓名缺失已用车牌填充', '姓名超15字', '姓名区分', '车牌重复',
+             '车牌无效', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']
     # 动态标签（如 门牌号超20字/车位号超20字）跟在白名单之后按序输出
     for label in order + [l for l in grouped if l not in order]:
         if label not in grouped:
@@ -598,6 +722,22 @@ def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_change
     ws = wb[sheet_name]
     red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
 
+    # 0) 统一数据区样式：以数据区第一个非空行（模板样式）为基准，
+    #    将字体/边框/对齐/底纹应用到整个数据区，保证导出文件样式统一美观
+    #    （被删除/清空的行同样保留统一边框，不出现无边框空洞）
+    first_data_row = header_row + 1
+    base_row = None
+    for r in range(first_data_row, ws.max_row + 1):
+        if any(ws.cell(row=r, column=c).value not in (None, '') for c in range(1, ws.max_column + 1)):
+            base_row = r
+            break
+    if base_row is None:
+        base_row = first_data_row
+    base_styles = [copy(ws.cell(row=base_row, column=c)._style) for c in range(1, ws.max_column + 1)]
+    for r in range(first_data_row, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            ws.cell(row=r, column=c)._style = copy(base_styles[c - 1])
+
     # 1) 写回修复值（清空 / 截断 / 时间归一化）
     for (orig_row, col), val in cell_changes.items():
         if col in col_pos and orig_row not in delete_rows:
@@ -633,12 +773,12 @@ def export_modified_file(data_bytes, sheet_name, col_pos, red_cells, cell_change
                 cell._style = styles[c - 1]
             if rh is not None:
                 ws.row_dimensions[target].height = rh
-        # 数据区剩余行（被删除行 / 未覆盖位置）清空值并恢复默认样式与行高
+        # 数据区剩余行（被删除行 / 未覆盖位置）清空值并应用统一模板样式（保留边框）
         for leftover in range(first_data_row + len(order), last_data_row + 1):
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(row=leftover, column=c)
                 cell.value = None
-                cell.style = 'Normal'
+                cell._style = copy(base_styles[c - 1])
             ws.row_dimensions[leftover].height = None
     else:
         # 无重排：直接删除整行（从下往上删，避免行号偏移）
@@ -1098,6 +1238,8 @@ def help_page():
 
     st.subheader('五、更新记录')
     st.markdown("""
+- **2026-09-17**：① 车牌符号处理细化——单车牌（无英文逗号）自动删除特殊符号（`渝A.52363`→`渝A52363`、`宁B•A2K52`→`宁BA2K52`）；多车牌（英文逗号隔开）拆分后逐个校验，不正确的标红（不自动删符号）；② 姓名空格——连续超过 4 个空格压缩为 2 个（其余保留），压缩后仍超 15 字走截断+复制备注；③ 手机号空格自动移除；多个手机号保留第一个有效号码，完整原值复制到备注；无效手机号清空并复制原始值到备注（方便核对）；④ 门牌号/车位号长度判断忽略空格；⑤ 导出文件数据区样式统一为模板样式（字体/边框/对齐/底纹一致）。
+- **2026-09-16**：`/help` 页面加访问密码 258（管理员自用，复用安全密码组件）。
 - **2026-09-15**：新增 `/help` 使用说明页（管理员自用，不展示在前台导航）；校验摘要与修改说明默认隐藏（设置环境变量 `SHOW_VALIDATION_SUMMARY=1` 可显示）；校验密码支持环境变量/`secrets.toml` 配置，密码框改用自研安全组件（普通文本框+圆点显示，浏览器不弹"保存密码"）。
 - **2026-09-15**：标红行（需人工核对修改）处理完后集中移动到文件末尾；姓名超 15 字截断后不再标红、不进末尾问题行；"姓名区分加数字"仅对"一位多车=是"的行生效。
 - **2026-09-14**：门牌号/车位号超 20 字截断（原值复制到备注列）；车牌重复按车位数容量优先分配去重；问题行摘要以单元格定位展示；下载文件名以"项目名称+时间戳"命名。
