@@ -263,17 +263,23 @@ def _parse_dates(series):
     return parsed
 
 
-def run_scheme(df, scheme, header_idx=0, match_fields=None):
+def run_scheme(df, scheme, header_idx=0, match_fields=None, enable_multi=False):
     """按预设方案执行校验。
 
     流程：车牌 O/I 字母自动替换为 0/1 → 多车牌拆分 + 按车位数容量优先去重 →
     逐列逐规则校验并按失败动作处理 → 时间列归一化为 yyyy-mm-dd → 空车牌行删除。
 
-    match_fields：一位多车匹配字段（多选，可含 默认/姓名/手机号/门牌号/车位号/身份证号）。
+    enable_multi（多位多车功能开关）：
+    - False（未勾选，默认）：跳过姓名区分/合并，按原有逻辑做纯数据清洗。
+    - True（勾选多位多车）：全部行参与匹配，匹配键可配置（match_fields）。
+      匹配到同一车主的组：结束时间相同 → 合并为一行（车牌/门牌/备注汇总，备注≤100字），
+      保留行"一位多车"填"是"、车位数写 1，其余行删除；
+      结束时间不同 → 第二个起姓名加数字区分（不改写一位多车/车位数）。
+
+    match_fields：多位多车匹配字段（勾选 enable_multi 时必选，可含
+    默认/姓名/手机号/门牌号/车位号/身份证号）。
     - 含"默认"：按 姓名+手机号 匹配（手机号为空时退化为仅按姓名）
-    - 其他字段：组合键——所选字段全部相同才视为同一车主，任一字段为空的行不参与合并
-    仅"一位多车=是"的行参与；组内结束时间相同 → 合并（车牌/门牌/备注汇总，备注≤100字）；
-    结束时间不同 → 第二个起姓名加数字（防系统误判一位多车）。
+    - 其他字段：组合键——所选字段全部相同才视为同一车主，任一字段为空的行不参与
 
     失败动作：
     - mark           ：无效单元格标红（必填缺失 / 时间无法解析 / 车牌省份或位数不对）
@@ -510,12 +516,15 @@ def run_scheme(df, scheme, header_idx=0, match_fields=None):
 
     col_letters = {name: _col_letter(i + 1) for i, name in enumerate(out.columns)}
 
-    # 1.5) 一位多车处理（匹配键可配置）：仅"一位多车=是"的行参与
-    #      匹配键：勾"默认"= 姓名+手机号（手机号为空退化为仅按姓名）；
-    #            勾其他字段（可多选）= 组合键，所选字段全部相同才算同一车主，任一字段为空的行不参与
+    # 1.5) 多位多车处理（功能开关 enable_multi）：仅勾选"多位多车"时执行。
+    #      未勾选 → 跳过本步骤（不做姓名区分、不做合并，按原有逻辑纯数据清洗）。
+    #      勾选后：全部行参与匹配（不再受"一位多车=是"限制），匹配键可配置：
+    #       - 勾"默认"= 姓名+手机号（手机号为空退化为仅按姓名）
+    #       - 勾其他字段（可多选）= 组合键，所选字段全部相同才算同一车主，任一字段为空的行不参与
     #      组内按结束时间再分组：
-    #       - 结束时间相同的多行 → 合并为一行（车牌/门牌/备注汇总，备注≤100字），其余行删除
-    #       - 结束时间不同的 → 第二个起姓名加数字（防系统误判一位多车）
+    #       - 结束时间相同的多行 → 合并为一行（车牌/门牌/备注汇总，备注≤100字），
+    #         保留行"一位多车"填"是"、车位数写 1，其余行删除
+    #       - 结束时间不同的 → 第二个起姓名加数字区分（不改写一位多车/车位数）
     # 列查找：优先方案 columns 配置，其次在上传文件表头列中模糊匹配
     # （车辆备注/身份证号等可能只出现在表头、未配置校验规则，同样要支持匹配与汇总）
     def _find_col(*keys):
@@ -533,115 +542,122 @@ def run_scheme(df, scheme, header_idx=0, match_fields=None):
     remark_col = _find_col('车辆备注', '备注')
     id_col = _find_col('身份证')
     lot_col = _find_col('车位号')
+    cap_col = _find_col('车位数')
     multi_col_name = '一位多车（必填项 是或者否）'
 
-    mf = match_fields or ['默认']
-    default_mode = '默认' in mf
-    field_map = {'姓名': name_col, '手机号': phone_col, '门牌号': door_col,
-                 '车位号': lot_col, '身份证号': id_col}
-    fields = ['姓名', '手机号'] if default_mode else [f for f in mf if f in field_map and field_map[f]]
+    if enable_multi:
+        mf = match_fields or ['默认']
+        default_mode = '默认' in mf
+        field_map = {'姓名': name_col, '手机号': phone_col, '门牌号': door_col,
+                     '车位号': lot_col, '身份证号': id_col}
+        fields = ['姓名', '手机号'] if default_mode else [f for f in mf if f in field_map and field_map[f]]
 
-    if name_col and end_col and name_col in out.columns and fields:
-        def _match_key(row):
-            key = []
-            for f in fields:
-                col = field_map[f]
-                v = _norm(row.get(col)) if col and col in row.index else ''
-                if default_mode and f == '手机号':
-                    if not v:
-                        continue  # 默认模式：手机号为空退化为仅按姓名
-                elif not v:
-                    return None  # 严格模式：任一字段为空，该行不参与合并
-                key.append(v)
-            return tuple(key)
+        if name_col and end_col and name_col in out.columns and fields:
+            def _match_key(row):
+                key = []
+                for f in fields:
+                    col = field_map[f]
+                    v = _norm(row.get(col)) if col and col in row.index else ''
+                    if default_mode and f == '手机号':
+                        if not v:
+                            continue  # 默认模式：手机号为空退化为仅按姓名
+                    elif not v:
+                        return None  # 严格模式：任一字段为空，该行不参与匹配
+                    key.append(v)
+                return tuple(key)
 
-        groups = {}
-        for idx in out.index:
-            nm = _norm(out.at[idx, name_col])
-            if not nm:
-                continue
-            # 仅"一位多车=是"的行参与；=否 的行系统不按一位多车处理，不需要改动
-            if multi_col_name in out.columns and _norm(out.at[idx, multi_col_name]).upper() != '是':
-                continue
-            k = _match_key(out.loc[idx])
-            if k is None:
-                continue
-            groups.setdefault(k, []).append(idx)
-
-        for k, idxs in groups.items():
-            if len(idxs) < 2:
-                continue
-            # 组内按结束时间细分
-            sub = {}
-            for i in idxs:
-                e = _norm(out.at[i, end_col])
-                sub.setdefault(e, []).append(i)
-            # ① 结束时间相同的子组（>1 行）→ 合并为一行
-            for e, sub_idxs in sub.items():
-                if len(sub_idxs) < 2 or not e:
+            groups = {}
+            for idx in out.index:
+                nm = _norm(out.at[idx, name_col])
+                if not nm:
                     continue
-                target = sub_idxs[0]
-                target_r = out.at[target, '__orig_row']
-                # 车牌汇总（去重保序，英文逗号隔开）
-                if plate_col and plate_col in out.columns:
-                    cur = _norm(out.at[target, plate_col])
-                    merged, seen = [], set()
-                    for m in sub_idxs:
-                        for sp in re.split(r'[,，、;；\s]+', _norm(out.at[m, plate_col])):
-                            if sp and sp not in seen:
-                                seen.add(sp)
-                                merged.append(sp)
-                    newp = ','.join(merged)
-                    if newp != cur:
-                        out.at[target, plate_col] = newp
-                        cell_changes[(target_r, plate_col)] = newp
-                # 门牌汇总（去重保序）
-                if door_col and door_col in out.columns:
-                    cur = _norm(out.at[target, door_col])
-                    merged = [d for d in dict.fromkeys(
-                        _norm(out.at[m, door_col]) for m in sub_idxs) if d]
-                    newd = '，'.join(merged)
-                    if newd != cur:
-                        out.at[target, door_col] = newd
-                        cell_changes[(target_r, door_col)] = newd
-                # 备注汇总（≤100字）：原备注 + 各被合并行备注（标注来源行号）
-                if remark_col and remark_col in out.columns:
-                    cur_remark = _norm(out.at[target, remark_col])
-                    parts = [cur_remark] if cur_remark else []
+                k = _match_key(out.loc[idx])
+                if k is None:
+                    continue
+                groups.setdefault(k, []).append(idx)
+
+            for k, idxs in groups.items():
+                if len(idxs) < 2:
+                    continue
+                # 组内按结束时间细分
+                sub = {}
+                for i in idxs:
+                    e = _norm(out.at[i, end_col])
+                    sub.setdefault(e, []).append(i)
+                # ① 结束时间相同的子组（>1 行）→ 合并为一行
+                for e, sub_idxs in sub.items():
+                    if len(sub_idxs) < 2 or not e:
+                        continue
+                    target = sub_idxs[0]
+                    target_r = out.at[target, '__orig_row']
+                    # 车牌汇总（去重保序，英文逗号隔开）
+                    if plate_col and plate_col in out.columns:
+                        cur = _norm(out.at[target, plate_col])
+                        merged, seen = [], set()
+                        for m in sub_idxs:
+                            for sp in re.split(r'[,，、;；\s]+', _norm(out.at[m, plate_col])):
+                                if sp and sp not in seen:
+                                    seen.add(sp)
+                                    merged.append(sp)
+                        newp = ','.join(merged)
+                        if newp != cur:
+                            out.at[target, plate_col] = newp
+                            cell_changes[(target_r, plate_col)] = newp
+                    # 门牌汇总（去重保序）
+                    if door_col and door_col in out.columns:
+                        cur = _norm(out.at[target, door_col])
+                        merged = [d for d in dict.fromkeys(
+                            _norm(out.at[m, door_col]) for m in sub_idxs) if d]
+                        newd = '，'.join(merged)
+                        if newd != cur:
+                            out.at[target, door_col] = newd
+                            cell_changes[(target_r, door_col)] = newd
+                    # 备注汇总（≤100字）：原备注 + 各被合并行备注（标注来源行号）
+                    if remark_col and remark_col in out.columns:
+                        cur_remark = _norm(out.at[target, remark_col])
+                        parts = [cur_remark] if cur_remark else []
+                        for m in sub_idxs[1:]:
+                            mr = _norm(out.at[m, remark_col])
+                            if mr:
+                                parts.append(f'第{out.at[m, "__orig_row"]}行备注：{mr}')
+                        new_remark = '；'.join(parts)
+                        if len(new_remark) > 100:
+                            new_remark = new_remark[:99] + '…'
+                        if new_remark != cur_remark:
+                            out.at[target, remark_col] = new_remark
+                            cell_changes[(target_r, remark_col)] = new_remark
+                    # 保留行：一位多车填"是"、车位数写 1（匹配到=同一车主多辆车）
+                    if multi_col_name in out.columns and _norm(out.at[target, multi_col_name]) != '是':
+                        out.at[target, multi_col_name] = '是'
+                        cell_changes[(target_r, multi_col_name)] = '是'
+                    if cap_col and cap_col in out.columns and _norm(out.at[target, cap_col]) != '1':
+                        out.at[target, cap_col] = 1
+                        cell_changes[(target_r, cap_col)] = 1
+                    issue_items.append(('多位多车已标注', target_r, f'第{target_r}行（一位多车=是，车位数1）'))
+                    # 被合并行删除 + 摘要
                     for m in sub_idxs[1:]:
-                        mr = _norm(out.at[m, remark_col])
-                        if mr:
-                            parts.append(f'第{out.at[m, "__orig_row"]}行备注：{mr}')
-                    new_remark = '；'.join(parts)
-                    if len(new_remark) > 100:
-                        new_remark = new_remark[:99] + '…'
-                    if new_remark != cur_remark:
-                        out.at[target, remark_col] = new_remark
-                        cell_changes[(target_r, remark_col)] = new_remark
-                # 被合并行删除 + 摘要
-                for m in sub_idxs[1:]:
-                    r = out.at[m, '__orig_row']
-                    delete_rows.add(r)
-                    issue_items.append(('一位多车合并', r, f'第{r}行（车牌合并至第{target_r}行）'))
-            # ② 结束时间不同的 → 第二个起姓名加数字（防误判一位多车）
-            ends = {_norm(out.at[i, end_col]) for i in idxs if _norm(out.at[i, end_col])}
-            if len(ends) < 2:
-                continue
-            remain = [i for i in idxs if out.at[i, '__orig_row'] not in delete_rows]
-            if len(remain) < 2:
-                continue
-            base_r = out.at[remain[0], '__orig_row']
-            base_nm = _norm(out.at[remain[0], name_col])
-            for n, i in enumerate(remain[1:], start=1):
-                cur = _norm(out.at[i, name_col])
-                suffix = str(n)
-                new_name = cur + suffix
-                if len(new_name) > 15:
-                    new_name = cur[:15 - len(suffix)] + suffix  # 超 15 字：截断原名保数字
-                out.at[i, name_col] = new_name
-                r = out.at[i, '__orig_row']
-                cell_changes[(r, name_col)] = new_name
-                issue_items.append(('姓名区分', r, f'第{r}行 {base_nm} → {new_name}（与第{base_r}行结束时间不同）'))
+                        r = out.at[m, '__orig_row']
+                        delete_rows.add(r)
+                        issue_items.append(('多位多车合并', r, f'第{r}行（车牌合并至第{target_r}行）'))
+                # ② 结束时间不同的 → 第二个起姓名加数字（防系统误判多位多车）
+                ends = {_norm(out.at[i, end_col]) for i in idxs if _norm(out.at[i, end_col])}
+                if len(ends) < 2:
+                    continue
+                remain = [i for i in idxs if out.at[i, '__orig_row'] not in delete_rows]
+                if len(remain) < 2:
+                    continue
+                base_r = out.at[remain[0], '__orig_row']
+                base_nm = _norm(out.at[remain[0], name_col])
+                for n, i in enumerate(remain[1:], start=1):
+                    cur = _norm(out.at[i, name_col])
+                    suffix = str(n)
+                    new_name = cur + suffix
+                    if len(new_name) > 15:
+                        new_name = cur[:15 - len(suffix)] + suffix  # 超 15 字：截断原名保数字
+                    out.at[i, name_col] = new_name
+                    r = out.at[i, '__orig_row']
+                    cell_changes[(r, name_col)] = new_name
+                    issue_items.append(('姓名区分', r, f'第{r}行 {base_nm} → {new_name}（与第{base_r}行结束时间不同）'))
 
     # 2) 逐列逐规则校验 + 修复动作
     for col, conf in columns_cfg.items():
@@ -767,10 +783,10 @@ def run_scheme(df, scheme, header_idx=0, match_fields=None):
         problem = out[out['__orig_row'].isin(problem_rows)]
         out = pd.concat([normal, problem], ignore_index=True)
 
-    # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身、O/I 替换、一位多车合并提示除外）
+    # 5) 汇总：被删除行上的其它问题不再列出（删除原因本身、O/I 替换、多位多车合并提示除外）
     grouped = {}
     for label, r, letter in issue_items:
-        if label not in ('车牌无效', '车牌重复', '车牌为空', '车牌O/I已替换', '一位多车合并') and r in delete_rows:
+        if label not in ('车牌无效', '车牌重复', '车牌为空', '车牌O/I已替换', '多位多车合并') and r in delete_rows:
             continue
         grouped.setdefault(label, []).append((r, letter))
 
@@ -780,7 +796,7 @@ def run_scheme(df, scheme, header_idx=0, match_fields=None):
 
     issues = []
     order = ['车牌O/I已替换', '车牌符号已清理', '姓名空格已压缩', '手机号空格已清理', '手机号多值已保留首个有效', '无效手机号',
-             '姓名缺失已用车牌填充', '姓名超15字', '姓名区分', '一位多车合并', '车牌重复',
+             '姓名缺失已用车牌填充', '姓名超15字', '姓名区分', '多位多车已标注', '多位多车合并', '车牌重复',
              '车牌无效', '车位不足', '车牌为空', '必填项缺失', '时间无法解析']
     # 动态标签（如 门牌号超20字/车位号超20字）跟在白名单之后按序输出
     for label in order + [l for l in grouped if l not in order]:
@@ -789,7 +805,7 @@ def run_scheme(df, scheme, header_idx=0, match_fields=None):
         rows = sorted(grouped[label])
         if label == '车牌O/I已替换':
             cells = [f'{letter}{r}（{old}→{new}）' for r, letter, old, new in rows]
-        elif label in ('车牌重复', '姓名区分', '一位多车合并'):
+        elif label in ('车牌重复', '姓名区分', '多位多车合并', '多位多车已标注'):
             cells = [text for _, text in rows]
         elif label == '车牌为空':
             cells = [f'第{r}行' for r, _ in rows]
@@ -1128,18 +1144,25 @@ def main_page():
         st.error('表头与所选方案不匹配：未找到方案中配置的任何列。请确认上传的是模板格式文件，或改用手动配置。')
         return
 
-    # 一位多车匹配字段（可多选）：判定"同一车主"的匹配键。
-    # 勾"默认" = 姓名+手机号（手机号为空退化为仅按姓名）；勾其他字段 = 组合键（所选字段全部相同才合并，
-    # 任一字段为空的行不参与合并）。仅"一位多车=是"的行参与合并。
+    # 多位多车（功能开关）：勾选后启用"多位多车"处理——按所选匹配字段判定同一车主，
+    # 匹配到的组：结束时间相同 → 合并为一行（车牌/门牌/备注汇总），保留行"一位多车"填"是"、车位数写1，
+    # 其余行删除；结束时间不同 → 第二个起姓名加数字区分。
+    # 未勾选 → 跳过姓名区分/合并，按原有逻辑做纯数据清洗。
     match_options = ['默认', '姓名', '手机号', '门牌号', '车位号', '身份证号']
-    prev_mf = st.session_state.get('scheme_match_fields')
-    match_fields = st.multiselect('一位多车匹配字段（判定同一车主）', match_options, default=['默认'])
-    if prev_mf is not None and prev_mf != match_fields:
+    enable_multi = st.checkbox('多位多车', value=False,
+                               help='勾选后需选择匹配字段；匹配到的同一车主将合并并标注"一位多车=是、车位数1"。未勾选按原有流程清洗。')
+    match_fields = []
+    if enable_multi:
+        match_fields = st.multiselect('匹配字段（判定同一车主）', match_options, default=['默认'])
+        if not match_fields:
+            st.warning('请至少选择一个匹配字段')
+    # 配置快照：勾选状态或匹配字段变化时，旧校验结果失效，直接清理（无需 rerun，同一次渲染内生效）
+    cfg_sig = (enable_multi, tuple(match_fields))
+    if st.session_state.get('scheme_cfg') != cfg_sig:
         for k in ['scheme_out', 'scheme_red', 'scheme_changes', 'scheme_delete',
                   'scheme_sheet', 'scheme_col_pos', 'scheme_raw', 'scheme_header', 'scheme_summary']:
             st.session_state.pop(k, None)
-        st.rerun()
-    st.session_state['scheme_match_fields'] = match_fields
+        st.session_state['scheme_cfg'] = cfg_sig
 
     # 开始校验 / 下载按钮并排：校验前开始校验为高亮主按钮，校验完成后变灰禁用，下载按钮为普通按钮
     has_run = 'scheme_out' in st.session_state
@@ -1208,7 +1231,9 @@ def main_page():
         auth_password = os.environ.get('VERIFY_PASSWORD', '')
 
     if run_clicked:
-        if auth_password:
+        if enable_multi and not match_fields:
+            st.error('已勾选多位多车，请至少选择一个匹配字段后再开始校验')
+        elif auth_password:
             st.session_state['need_auth'] = True
             st.rerun()
         else:
@@ -1241,7 +1266,8 @@ def main_page():
 
     if st.session_state.pop('do_run', False):
         out, red_cells, cell_changes, delete_rows, summary = run_scheme(df, scheme, header_idx=header_idx,
-                                                                        match_fields=match_fields)
+                                                                        match_fields=match_fields,
+                                                                        enable_multi=enable_multi)
 
         # 列名 -> 列号（用于在原文件上定位单元格）
         col_pos = {}
@@ -1287,9 +1313,11 @@ def main_page():
                            '无效手机号已清空（原值复制到备注列）；'
                            '姓名超15字已截断（原姓名复制到备注列）；姓名缺失时用同行车牌号填充；'
                            '门牌号/车位号超20字已截断（原值复制到备注列）；'
-                           '同名同手机号且"一位多车=是"的行结束时间不同时，第二个起姓名加数字1、2…区分（避免误判一位多车）；'
-                           '一位多车=是 且匹配字段相同的行，结束时间相同则合并为一行（车牌/门牌/备注汇总，备注≤100字）；'
-                           '一位多车匹配字段可多选（默认=姓名+手机号，手机号空退化为姓名；也可选门牌号/车位号/身份证号等组合键，字段为空的行不参与合并）；'
+                           '勾选"多位多车"后：按所选匹配字段判定同一车主（默认=姓名+手机号，手机号空退化为姓名；'
+                           '也可选门牌号/车位号/身份证号等组合键，字段为空的行不参与匹配），'
+                           '匹配到的组结束时间相同则合并为一行（车牌/门牌/备注汇总，备注≤100字），'
+                           '保留行"一位多车"填"是"、车位数写1，其余行删除；'
+                           '结束时间不同则第二个起姓名加数字1、2…区分；未勾选"多位多车"时不做姓名区分/合并；'
                            '车牌为空已删除整行；标红的单元格请在原表中核对修改。')
 
         st.write('校验结果预览：')
@@ -1367,7 +1395,7 @@ def help_page():
 
     st.subheader('五、更新记录')
     st.markdown("""
-- **2026-09-18**：一位多车合并逻辑升级——匹配字段可多选（默认/姓名/手机号/门牌号/车位号/身份证号）。勾"默认"=姓名+手机号（手机号空退化为姓名）；勾其他字段=组合键（全部相同才合并，字段为空的行不参与）。仅"一位多车=是"的行参与：结束时间相同 → 合并为一行（车牌/门牌/备注汇总到第一行，备注≤100字，其余行删除）；结束时间不同 → 保留"姓名加数字"区分逻辑。
+- **2026-09-18**：① 新增"多位多车"功能开关——勾选后需选择匹配字段（默认/姓名/手机号/门牌号/车位号/身份证号，可多选）；勾"默认"=姓名+手机号（手机号空退化为姓名），勾其他字段=组合键（全部相同才匹配，字段为空的行不参与）。匹配到的同一车主：结束时间相同 → 合并为一行（车牌/门牌/备注汇总到第一行，备注≤100字），保留行"一位多车"填"是"、车位数写1，其余行删除；结束时间不同 → 第二个起姓名加数字区分。未勾选"多位多车" → 跳过姓名区分/合并，按原有逻辑纯数据清洗。
 - **2026-09-17**：① 车牌符号处理细化——单车牌（无英文逗号）自动删除特殊符号（`渝A.52363`→`渝A52363`、`宁B•A2K52`→`宁BA2K52`）；多车牌（英文逗号隔开）拆分后逐个校验，不正确的标红（不自动删符号）；② 姓名空格——连续超过 4 个空格压缩为 2 个（其余保留），压缩后仍超 15 字走截断+复制备注；③ 手机号空格自动移除；多个手机号保留第一个有效号码，完整原值复制到备注；无效手机号清空并复制原始值到备注（方便核对）；④ 门牌号/车位号长度判断忽略空格；⑤ 导出文件数据区样式统一为模板样式（字体/边框/对齐/底纹一致）。
 - **2026-09-16**：`/help` 页面加访问密码 258（管理员自用，复用安全密码组件）。
 - **2026-09-15**：新增 `/help` 使用说明页（管理员自用，不展示在前台导航）；校验摘要与修改说明默认隐藏（设置环境变量 `SHOW_VALIDATION_SUMMARY=1` 可显示）；校验密码支持环境变量/`secrets.toml` 配置，密码框改用自研安全组件（普通文本框+圆点显示，浏览器不弹"保存密码"）。
