@@ -1075,18 +1075,18 @@ def main_page():
     manual_label = '手动配置（不匹配方案）'
     all_options = scheme_names + [manual_label]
 
-    # 上传区 + 问题反馈入口（同款小字样式，紧挨上传框）
-    up_col, fb_col = st.columns([6, 1], vertical_alignment='center')
-    with up_col:
-        uploaded_file = st.file_uploader('上传 CSV 或 Excel 文件', type=['csv', 'xls', 'xlsx'])
-    with fb_col:
-        st.markdown(
-            '<a href="https://f.kdocs.cn/g/NiuECq9U/" target="_blank" '
-            'style="color:#8c8c8c;text-decoration:none;font-size:12px;'
-            'background:rgba(255,255,255,0.85);padding:3px 12px;border-radius:12px;'
-            'box-shadow:0 1px 4px rgba(0,0,0,0.08);display:inline-block;">问题反馈</a>',
-            unsafe_allow_html=True,
-        )
+    # 上传标签 + 问题反馈入口：问题反馈紧挨"上传 CSV 或 Excel 文件"文字右侧（同一行）
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">'
+        '<span style="font-size:14px;color:rgb(49,51,63);line-height:1.5;">上传 CSV 或 Excel 文件</span>'
+        '<a href="https://f.kdocs.cn/g/NiuECq9U/" target="_blank" '
+        'style="color:#8c8c8c;text-decoration:none;font-size:12px;'
+        'background:rgba(255,255,255,0.85);padding:3px 12px;border-radius:12px;'
+        'box-shadow:0 1px 4px rgba(0,0,0,0.08);display:inline-block;">问题反馈</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    uploaded_file = st.file_uploader('', type=['csv', 'xls', 'xlsx'], label_visibility='collapsed')
 
     if uploaded_file is None:
         st.info('请上传文件后开始校验。')
