@@ -1164,7 +1164,7 @@ def main_page():
                                help='测试功能，可能会有bug 慎用 如有发现bug 欢迎反馈')
     match_fields = []
     if enable_multi:
-        match_fields = st.multiselect('匹配字段（判定同一车主）', match_options, default=['默认'])
+        match_fields = st.multiselect('选项', match_options, default=['默认'])
         if not match_fields:
             st.warning('请至少选择一个匹配字段')
     # 配置快照：勾选状态或匹配字段变化时，旧校验结果失效，直接清理（无需 rerun，同一次渲染内生效）
