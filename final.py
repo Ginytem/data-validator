@@ -1069,7 +1069,15 @@ def main_page():
 </style>
 """, unsafe_allow_html=True)
     st.title('Data Validator')
-    st.link_button('问题反馈', 'https://f.kdocs.cn/g/NiuECq9U/', use_container_width=False)
+    # 问题反馈入口：固定于页面右下角，小字低调样式，不占文档流
+    st.markdown(
+        '<div style="position:fixed;bottom:12px;right:20px;z-index:999;font-size:12px;'
+        'color:#999;background:rgba(255,255,255,0.85);padding:3px 12px;border-radius:12px;'
+        'box-shadow:0 1px 4px rgba(0,0,0,0.08);">'
+        '<a href="https://f.kdocs.cn/g/NiuECq9U/" target="_blank" '
+        'style="color:#8c8c8c;text-decoration:none;">问题反馈</a></div>',
+        unsafe_allow_html=True,
+    )
 
     schemes = load_schemes()
     scheme_names = [s.get('name', f'方案{i + 1}') for i, s in enumerate(schemes)]
