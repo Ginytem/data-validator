@@ -1069,6 +1069,7 @@ def main_page():
 </style>
 """, unsafe_allow_html=True)
     st.title('Data Validator')
+    st.link_button('问题反馈', 'https://f.kdocs.cn/g/NiuECq9U/', use_container_width=False)
 
     schemes = load_schemes()
     scheme_names = [s.get('name', f'方案{i + 1}') for i, s in enumerate(schemes)]
@@ -1150,7 +1151,7 @@ def main_page():
     # 未勾选 → 跳过姓名区分/合并，按原有逻辑做纯数据清洗。
     match_options = ['默认', '姓名', '手机号', '门牌号', '车位号', '身份证号']
     enable_multi = st.checkbox('多位多车', value=False,
-                               help='勾选后需选择匹配字段；匹配到的同一车主将合并并标注"一位多车=是、车位数1"。未勾选按原有流程清洗。')
+                               help='测试功能，可能会有bug 慎用 如有发现bug 欢迎反馈')
     match_fields = []
     if enable_multi:
         match_fields = st.multiselect('匹配字段（判定同一车主）', match_options, default=['默认'])
