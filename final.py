@@ -1518,7 +1518,8 @@ def help_page():
     if not st.session_state.get('help_auth_ok'):
         st.markdown("""
 <style>
-div[data-testid="stVerticalBlock"].st-emotion-cache-1te8eqs {
+div[data-testid="stVerticalBlock"].st-emotion-cache-1te8eqs,
+div[data-testid="stHeadingWithActionElements"] {
     max-width: 480px !important;
     margin-left: auto !important;
     margin-right: auto !important;
