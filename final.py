@@ -9,6 +9,10 @@ import datetime
 import numpy as np
 import threading
 import openpyxl
+import time
+import base64
+import pyotp
+import qrcode
 from copy import copy
 from openpyxl.styles import PatternFill, Font, Border, Alignment
 from openpyxl.utils import get_column_letter
@@ -31,6 +35,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEMES_PATH = os.path.join(BASE_DIR, 'schemes.json')
 USAGE_LOG_PATH = os.path.join(BASE_DIR, 'usage_log.json')
 USAGE_COUNT_PATH = os.path.join(BASE_DIR, 'usage_count.json')
+TOTP_SECRET_PATH = os.path.join(BASE_DIR, 'totp_secret.txt')
+HELP_ATTEMPTS_PATH = os.path.join(BASE_DIR, 'help_auth_attempts.json')
+HELP_MAX_WRONG = 3          # 1 分钟内最多 3 次错误
+HELP_WINDOW_SEC = 60        # 滑动窗口（秒）
 _usage_lock = threading.Lock()
 
 # 安全密码输入组件：普通文本框 + 字符圆点显示，浏览器不识别为密码框、不弹"保存密码"
@@ -1427,32 +1435,111 @@ def main_page():
         st.write(out)
 
 
+def _load_totp_secret():
+    """读取或首次生成 TOTP 密钥；返回 (secret, is_first)。"""
+    try:
+        with open(TOTP_SECRET_PATH, 'r', encoding='utf-8') as f:
+            s = f.read().strip()
+        if s:
+            return s, False
+    except Exception:
+        pass
+    s = pyotp.random_base32()
+    try:
+        with open(TOTP_SECRET_PATH, 'w', encoding='utf-8') as f:
+            f.write(s)
+    except Exception:
+        pass
+    return s, True
+
+
+def _help_attempts_load():
+    try:
+        with open(HELP_ATTEMPTS_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _help_attempts_save(data):
+    try:
+        with open(HELP_ATTEMPTS_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _help_check_locked(ip):
+    """当前 IP 在滑动窗口内是否已达错误上限；返回 (locked, wait_seconds)。"""
+    now = time.time()
+    stamps = [float(t) for t in _help_attempts_load().get(ip, []) if now - float(t) < HELP_WINDOW_SEC]
+    if len(stamps) >= HELP_MAX_WRONG:
+        wait = int(HELP_WINDOW_SEC - (now - min(stamps)))
+        return True, max(1, wait)
+    return False, 0
+
+
+def _help_record_wrong(ip):
+    data = _help_attempts_load()
+    now = time.time()
+    stamps = [float(t) for t in data.get(ip, []) if now - float(t) < HELP_WINDOW_SEC]
+    # iframe 组件 postMessage 偶发重复触发，1 秒内只记一次
+    if stamps and now - stamps[-1] < 1.0:
+        return
+    stamps.append(now)
+    data[ip] = [str(t) for t in stamps]
+    _help_attempts_save(data)
+
+
+def _help_clear_wrong(ip):
+    data = _help_attempts_load()
+    data[ip] = []
+    _help_attempts_save(data)
+
+
 def help_page():
     """使用说明页：展示校验规则与处理逻辑，管理员自用（访问需密码 258）"""
     st.set_page_config(page_title='使用说明 - Data Validator')
 
-    HELP_PASSWORD = '258'  # /help 页面访问密码
+    secret, is_first = _load_totp_secret()
 
     if not st.session_state.get('help_auth_ok'):
         st.title('使用说明')
         with st.container(border=True):
-            st.caption('本页面为管理员专享，请输入访问密码')
+            # 首次绑定：显示二维码 + 密钥
+            if is_first:
+                st.warning('首次使用：请用手机验证器（Google Authenticator / 微软 Authenticator / 微信「二次验证」）扫码绑定')
+                otpauth = pyotp.TOTP(secret).provisioning_uri(name='DataValidator', issuer_name='DataValidator')
+                st.image(qrcode.make(otpauth), width=200)
+                st.caption('扫码失败可手动输入密钥：')
+                st.code(secret)
+                st.caption('绑定后，把验证器里的 6 位动态码填到下方')
+
+            ip = _get_client_ip()
+            locked, wait = _help_check_locked(ip)
+            if locked:
+                st.error(f"尝试过于频繁，请 {wait} 秒后再试（1 分钟内最多 {HELP_MAX_WRONG} 次错误）。")
+                st.stop()
+            st.caption('本页面为管理员专享，请输入手机验证器中的 6 位动态码')
             reset_token = st.session_state.get('help_auth_reset', 0)
             comp_res = _PW_COMPONENT(reset_token=reset_token, key='help_pw_comp')
             if comp_res:
                 if comp_res.get('action') == 'confirm':
-                    if comp_res.get('pw') == HELP_PASSWORD:
+                    code = (comp_res.get('pw') or '').strip()
+                    if pyotp.TOTP(secret).verify(code, valid_window=1):
                         st.session_state['help_auth_ok'] = True
                         st.session_state['help_auth_err'] = False
+                        _help_clear_wrong(ip)
                         st.rerun()
                     else:
+                        _help_record_wrong(ip)
                         st.session_state['help_auth_err'] = True
                         st.session_state['help_auth_reset'] = reset_token + 1
                         st.rerun()
                 elif comp_res.get('action') == 'cancel':
                     st.rerun()
             if st.session_state.get('help_auth_err'):
-                st.error('密码错误，请重试')
+                st.error('动态码错误，请核对手机验证器后重试（1 分钟内最多 3 次错误）')
         st.stop()
 
     st.title('使用说明')

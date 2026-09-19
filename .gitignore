@@ -20,3 +20,7 @@ Thumbs.db
 _*.xlsx
 _*.csv
 _*.py
+# TOTP 密钥与 help 页登录限流记录（敏感，不入库）
+totp_secret.txt
+help_auth_attempts.json
+usage_log.json
