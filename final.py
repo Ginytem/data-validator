@@ -30,6 +30,7 @@ MOBILE_RE = re.compile(r'^1[3-9]\d{9}$')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEMES_PATH = os.path.join(BASE_DIR, 'schemes.json')
 USAGE_LOG_PATH = os.path.join(BASE_DIR, 'usage_log.json')
+USAGE_COUNT_PATH = os.path.join(BASE_DIR, 'usage_count.json')
 _usage_lock = threading.Lock()
 
 # 安全密码输入组件：普通文本框 + 字符圆点显示，浏览器不识别为密码框、不弹"保存密码"
@@ -78,6 +79,24 @@ def _save_usage_log(records):
         os.replace(tmp, USAGE_LOG_PATH)
 
 
+def _load_usage_count():
+    """累计校验下载次数（初始 18，每次下载 +1；独立于可清空的使用记录）。"""
+    try:
+        with open(USAGE_COUNT_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return int(data.get('total', 18))
+    except Exception:
+        return 18
+
+
+def _save_usage_count(total):
+    with _usage_lock:
+        tmp = USAGE_COUNT_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'total': total}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, USAGE_COUNT_PATH)
+
+
 def _append_download_log(filename):
     """记录一次下载：时间、IP、文件名、该 IP 当日下载次数（含本次）。"""
     ip = _get_client_ip()
@@ -92,6 +111,8 @@ def _append_download_log(filename):
         'day_count': today_count,
     })
     _save_usage_log(records)
+    # 累计处理次数 +1（独立于可清空的下载记录，与下载行为同步）
+    _save_usage_count(_load_usage_count() + 1)
     return ip, today_count
 
 
@@ -1129,7 +1150,15 @@ def main_page():
 }
 </style>
 """, unsafe_allow_html=True)
-    st.title('Data Validator')
+    # 标题 + 累计处理次数（初始 18，每次校验完成并下载 +1）
+    usage_total = _load_usage_count()
+    st.markdown(
+        '<div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">'
+        '<h1 style="margin:0;font-size:2.1rem;">Data Validator</h1>'
+        f'<span style="font-size:0.85rem;opacity:0.7;white-space:nowrap;">已累计完成 {usage_total} 次数据处理</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     schemes = load_schemes()
     scheme_names = [s.get('name', f'方案{i + 1}') for i, s in enumerate(schemes)]
