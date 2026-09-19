@@ -7,6 +7,7 @@ import json
 import os
 import datetime
 import numpy as np
+import threading
 import openpyxl
 from copy import copy
 from openpyxl.styles import PatternFill, Font, Border, Alignment
@@ -28,10 +29,70 @@ MOBILE_RE = re.compile(r'^1[3-9]\d{9}$')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEMES_PATH = os.path.join(BASE_DIR, 'schemes.json')
+USAGE_LOG_PATH = os.path.join(BASE_DIR, 'usage_log.json')
+_usage_lock = threading.Lock()
 
 # 安全密码输入组件：普通文本框 + 字符圆点显示，浏览器不识别为密码框、不弹"保存密码"
 _PW_COMPONENT = components.declare_component(
     'secure_password_input', path=os.path.join(BASE_DIR, 'secure_password'))
+
+
+# ============ 使用记录（下载行为日志） ============
+
+def _get_client_ip():
+    """获取客户端 IP：优先 Streamlit context，其次 X-Forwarded-For（Cloudflare 隧道场景）。"""
+    ip = None
+    try:
+        ip = getattr(st.context, 'client_ip', None)
+    except Exception:
+        ip = None
+    if not ip or ip in ('127.0.0.1', '::1', 'localhost'):
+        try:
+            hdrs = getattr(st.context, 'headers', None) or {}
+            xff = (hdrs.get('X-Forwarded-For') or hdrs.get('X-Real-IP') or '').strip()
+            if xff:
+                ip = xff.split(',')[0].strip()
+        except Exception:
+            pass
+    if not ip or ip in ('127.0.0.1', '::1', 'localhost'):
+        return '本机'
+    return ip
+
+
+def _load_usage_log():
+    try:
+        with open(USAGE_LOG_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_usage_log(records):
+    with _usage_lock:
+        tmp = USAGE_LOG_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, USAGE_LOG_PATH)
+
+
+def _append_download_log(filename):
+    """记录一次下载：时间、IP、文件名、该 IP 当日下载次数（含本次）。"""
+    ip = _get_client_ip()
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    records = _load_usage_log()
+    today_count = sum(1 for r in records if r.get('ip') == ip and r.get('date') == today) + 1
+    records.append({
+        'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'date': today,
+        'ip': ip,
+        'filename': filename,
+        'day_count': today_count,
+    })
+    _save_usage_log(records)
+    return ip, today_count
 
 
 # Normalize cell value to a clean string before regex matching:
@@ -1230,6 +1291,8 @@ def main_page():
                 out_name,
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 use_container_width=True,
+                on_click=_append_download_log,
+                args=(out_name,),
             )
         else:
             st.caption('校验完成后可在此下载处理好的文件')
@@ -1404,7 +1467,46 @@ def help_page():
 - **处理后的文件格式会变吗？** 不会，保留原模板的说明行、表头、列宽等全部格式，可直接使用。
 """)
 
-    st.subheader('五、更新记录')
+    st.subheader('五、使用记录')
+    st.caption('记录每次下载处理文件的行为：时间 / IP / 处理后的文件名 / 该 IP 当日下载次数')
+    records = _load_usage_log()
+    if records:
+        rows = [{'time': r.get('time', ''), 'ip': r.get('ip', ''), 'filename': r.get('filename', ''),
+                 'day_count': r.get('day_count', 0)} for r in reversed(records)]
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'time': '下载时间',
+                'ip': 'IP',
+                'filename': '处理后的文件名',
+                'day_count': '当日下载次数',
+            },
+        )
+        ip_stat = {}
+        for r in records:
+            ip_stat[r.get('ip', '')] = ip_stat.get(r.get('ip', ''), 0) + 1
+        st.caption(f'共 {len(records)} 条下载记录，涉及 {len(ip_stat)} 个 IP。')
+        if st.session_state.get('confirm_clear_usage'):
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if st.button('确认清空全部记录', type='primary'):
+                    _save_usage_log([])
+                    st.session_state['confirm_clear_usage'] = False
+                    st.rerun()
+            with c2:
+                if st.button('取消'):
+                    st.session_state['confirm_clear_usage'] = False
+                    st.rerun()
+        else:
+            if st.button('清空使用记录'):
+                st.session_state['confirm_clear_usage'] = True
+                st.rerun()
+    else:
+        st.caption('暂无使用记录。')
+
+    st.subheader('六、更新记录')
     st.markdown("""
 - **2026-09-18**：① 新增"多位多车"功能开关——勾选后需选择匹配字段（默认/姓名/手机号/门牌号/车位号/身份证号，可多选）；勾"默认"=姓名+手机号（手机号空退化为姓名），勾其他字段=组合键（全部相同才匹配，字段为空的行不参与）。匹配到的同一车主：结束时间相同 → 合并为一行（车牌/门牌/备注汇总到第一行，备注≤100字），保留行"一位多车"填"是"、车位数写1，其余行删除；结束时间不同 → 第二个起姓名加数字区分。未勾选"多位多车" → 跳过姓名区分/合并，按原有逻辑纯数据清洗。
 - **2026-09-17**：① 车牌符号处理细化——单车牌（无英文逗号）自动删除特殊符号（`渝A.52363`→`渝A52363`、`宁B•A2K52`→`宁BA2K52`）；多车牌（英文逗号隔开）拆分后逐个校验，不正确的标红（不自动删符号）；② 姓名空格——连续超过 4 个空格压缩为 2 个（其余保留），压缩后仍超 15 字走截断+复制备注；③ 手机号空格自动移除；多个手机号保留第一个有效号码，完整原值复制到备注；无效手机号清空并复制原始值到备注（方便核对）；④ 门牌号/车位号长度判断忽略空格；⑤ 导出文件数据区样式统一为模板样式（字体/边框/对齐/底纹一致）。
