@@ -1516,46 +1516,52 @@ def help_page():
     secret, is_first = _load_totp_secret()
 
     if not st.session_state.get('help_auth_ok'):
+        st.markdown("""
+<style>
+div[data-testid="stVerticalBlock"].st-emotion-cache-1te8eqs {
+    max-width: 480px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}
+</style>
+""", unsafe_allow_html=True)
         st.title('使用说明')
-        _lc1, _lc2, _lc3 = st.columns([1, 2, 1])
-        with _lc2:
-            with st.container(border=True):
-                # 首次绑定：显示二维码 + 密钥
-                if is_first:
-                    st.warning('首次使用：请用手机验证器（Google Authenticator / 微软 Authenticator / 微信「二次验证」）扫码绑定')
-                    otpauth = pyotp.TOTP(secret).provisioning_uri(name='DataValidator', issuer_name='DataValidator')
-                    st.image(qrcode.make(otpauth), width=200)
-                    st.caption('扫码失败可手动输入密钥：')
-                    st.code(secret)
-                    st.caption('绑定后，把验证器里的 6 位动态码填到下方')
+        with st.container(border=True):
+            if is_first:
+                st.warning('首次使用：请用手机验证器（Google Authenticator / 微软 Authenticator / 微信「二次验证」）扫码绑定')
+                otpauth = pyotp.TOTP(secret).provisioning_uri(name='DataValidator', issuer_name='DataValidator')
+                st.image(qrcode.make(otpauth), width=200)
+                st.caption('扫码失败可手动输入密钥：')
+                st.code(secret)
+                st.caption('绑定后，把验证器里的 6 位动态码填到下方')
 
-                ip = _get_client_ip()
-                locked, wait = _help_check_locked(ip)
-                if locked:
-                    st.error(f"尝试过于频繁，请 {wait} 秒后再试（1 分钟内最多 {HELP_MAX_WRONG} 次错误）。")
-                    st.stop()
-                st.caption('请输入验证码后访问')
-                reset_token = st.session_state.get('help_auth_reset', 0)
-                comp_res = _PW_COMPONENT(reset_token=reset_token, key='help_pw_comp')
-                if comp_res:
-                    if comp_res.get('action') == 'confirm':
-                        code = (comp_res.get('pw') or '').strip()
-                        if pyotp.TOTP(secret).verify(code, valid_window=1):
-                            _help_clear_wrong(ip)
-                            components.html(
-                                "<script>document.cookie='help_auth=ok; max-age=10800; path=/; SameSite=Lax'; setTimeout(function(){try{window.parent.location.reload();}catch(e){}}, 200);</script>",
-                                height=0,
-                            )
-                            st.stop()
-                        else:
-                            _help_record_wrong(ip)
-                            st.session_state['help_auth_err'] = True
-                            st.session_state['help_auth_reset'] = reset_token + 1
-                            st.rerun()
-                    elif comp_res.get('action') == 'cancel':
-                        st.switch_page(st.session_state['_main_page_obj'])
-                if st.session_state.get('help_auth_err'):
-                    st.error('验证码错误，请核对后再试！')
+            ip = _get_client_ip()
+            locked, wait = _help_check_locked(ip)
+            if locked:
+                st.error(f"尝试过于频繁，请 {wait} 秒后再试（1 分钟内最多 {HELP_MAX_WRONG} 次错误）。")
+                st.stop()
+            st.caption('请输入验证码后访问')
+            reset_token = st.session_state.get('help_auth_reset', 0)
+            comp_res = _PW_COMPONENT(reset_token=reset_token, key='help_pw_comp')
+            if comp_res:
+                if comp_res.get('action') == 'confirm':
+                    code = (comp_res.get('pw') or '').strip()
+                    if pyotp.TOTP(secret).verify(code, valid_window=1):
+                        _help_clear_wrong(ip)
+                        components.html(
+                            "<script>document.cookie='help_auth=ok; max-age=10800; path=/; SameSite=Lax'; setTimeout(function(){try{window.parent.location.reload();}catch(e){}}, 200);</script>",
+                            height=0,
+                        )
+                        st.stop()
+                    else:
+                        _help_record_wrong(ip)
+                        st.session_state['help_auth_err'] = True
+                        st.session_state['help_auth_reset'] = reset_token + 1
+                        st.rerun()
+                elif comp_res.get('action') == 'cancel':
+                    st.switch_page(st.session_state['_main_page_obj'])
+            if st.session_state.get('help_auth_err'):
+                st.error('验证码错误，请核对后再试！')
         st.stop()
 
     st.title('使用说明')
