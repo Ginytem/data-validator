@@ -63,6 +63,9 @@
       }
       ok.addEventListener('click', doConfirm);
       cancel.addEventListener('click', function () {
+        // 浏览器安全策略（组件 iframe sandbox 无 allow-top-navigation）不允许从内部关闭/跳转主页面，
+        // 这里只清空输入框；要离开请直接关闭本标签或手动返回主页。
+        pw.value = '';
         send('streamlit:setComponentValue', { value: { action: 'cancel' } });
       });
       pw.addEventListener('keydown', function (e) {

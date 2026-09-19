@@ -1501,6 +1501,18 @@ def help_page():
     """使用说明页：展示校验规则与处理逻辑，管理员自用（访问需密码 258）"""
     st.set_page_config(page_title='使用说明 - Data Validator')
 
+    # cookie 记住登录 3 小时（本地/公网各自独立）
+    try:
+        raw_cookie = ''
+        for k, v in (getattr(st.context, 'headers', {}) or {}).items():
+            if k.lower() == 'cookie':
+                raw_cookie = v or ''
+                break
+        if 'help_auth=ok' in raw_cookie:
+            st.session_state['help_auth_ok'] = True
+    except Exception:
+        pass
+
     secret, is_first = _load_totp_secret()
 
     if not st.session_state.get('help_auth_ok'):
@@ -1520,26 +1532,29 @@ def help_page():
             if locked:
                 st.error(f"尝试过于频繁，请 {wait} 秒后再试（1 分钟内最多 {HELP_MAX_WRONG} 次错误）。")
                 st.stop()
-            st.caption('本页面为管理员专享，请输入手机验证器中的 6 位动态码')
+            st.caption('请输入验证码后访问')
             reset_token = st.session_state.get('help_auth_reset', 0)
             comp_res = _PW_COMPONENT(reset_token=reset_token, key='help_pw_comp')
             if comp_res:
                 if comp_res.get('action') == 'confirm':
                     code = (comp_res.get('pw') or '').strip()
                     if pyotp.TOTP(secret).verify(code, valid_window=1):
-                        st.session_state['help_auth_ok'] = True
-                        st.session_state['help_auth_err'] = False
                         _help_clear_wrong(ip)
-                        st.rerun()
+                        components.html(
+                            "<script>document.cookie='help_auth=ok; max-age=10800; path=/; SameSite=Lax'; setTimeout(function(){try{window.parent.location.reload();}catch(e){}}, 200);</script>",
+                            height=0,
+                        )
+                        st.stop()
                     else:
                         _help_record_wrong(ip)
                         st.session_state['help_auth_err'] = True
                         st.session_state['help_auth_reset'] = reset_token + 1
                         st.rerun()
                 elif comp_res.get('action') == 'cancel':
-                    st.rerun()
+                    # 前端组件已让顶层窗口跳回主页，这里直接停止渲染
+                    st.stop()
             if st.session_state.get('help_auth_err'):
-                st.error('动态码错误，请核对手机验证器后重试（1 分钟内最多 3 次错误）')
+                st.error('验证码错误，请核对后再试！')
         st.stop()
 
     st.title('使用说明')
