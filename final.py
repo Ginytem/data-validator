@@ -1555,6 +1555,7 @@ def help_page():
                     st.stop()
             if st.session_state.get('help_auth_err'):
                 st.error('验证码错误，请核对后再试！')
+            st.link_button('返回主页', '/')
         st.stop()
 
     st.title('使用说明')
