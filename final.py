@@ -1551,11 +1551,9 @@ def help_page():
                         st.session_state['help_auth_reset'] = reset_token + 1
                         st.rerun()
                 elif comp_res.get('action') == 'cancel':
-                    # 前端组件已让顶层窗口跳回主页，这里直接停止渲染
-                    st.stop()
+                    st.switch_page(st.session_state['_main_page_obj'])
             if st.session_state.get('help_auth_err'):
                 st.error('验证码错误，请核对后再试！')
-            st.link_button('返回主页', '/')
         st.stop()
 
     st.title('使用说明')
@@ -1653,11 +1651,10 @@ def help_page():
 
 def main():
     # 隐藏侧边栏导航：前台只显示主页面，/help 通过 URL 直接访问（管理员自用）
-    pages = st.navigation([
-        st.Page(main_page, title='数据校验', url_path='main', default=True),
-        st.Page(help_page, title='使用说明', url_path='help'),
-    ], position='hidden')
-    pages.run()
+    main_pg = st.Page(main_page, title='数据校验', url_path='main', default=True)
+    help_pg = st.Page(help_page, title='使用说明', url_path='help')
+    st.session_state['_main_page_obj'] = main_pg
+    st.navigation([main_pg, help_pg], position='hidden').run()
 
 
 if __name__ == '__main__':
